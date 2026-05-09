@@ -1023,16 +1023,20 @@ def check_all_command_guards(command: str, env_type: str,
     session_key = get_current_session_key()
 
     # Tirith block/warn → approvable warning with rich findings.
-    # Previously, tirith "block" was a hard block with no approval prompt.
-    # Now both block and warn go through the approval flow so users can
-    # inspect the explanation and approve if they understand the risk.
-    if tirith_result["action"] in ("block", "warn"):
+    # "warn" goes through approval flow so users can inspect and decide.
+    # "block" remains a hard block (non-approvable) to preserve security
+    # guarantees — previously it was also a hard block.
+    if tirith_result["action"] == "warn":
         findings = tirith_result.get("findings") or []
         rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
         tirith_key = f"tirith:{rule_id}"
         tirith_desc = _format_tirith_description(tirith_result)
         if not is_approved(session_key, tirith_key):
             warnings.append((tirith_key, tirith_desc, True))
+    elif tirith_result["action"] == "block":
+        # Hard block — no approval override
+        tirith_desc = _format_tirith_description(tirith_result)
+        return {"approved": False, "message": f"BLOCKED by Tirith: {tirith_desc}"}
 
     if is_dangerous:
         if not is_approved(session_key, pattern_key):

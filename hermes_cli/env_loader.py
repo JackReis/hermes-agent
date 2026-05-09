@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from utils import atomic_replace
 
 
@@ -139,6 +142,42 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
         pass  # best-effort — don't block gateway startup
 
 
+def _load_sops_secrets_env(path: Path, *, override: bool) -> bool:
+    """Decrypt a SOPS-encrypted dotenv via stdout and apply to os.environ.
+
+    The plaintext never touches disk. Returns True on success, False if sops
+    is missing or decrypt fails (caller should treat as a no-op fallback).
+
+    Honors SOPS_AGE_KEY_FILE if set; otherwise sops uses its default search.
+    """
+    if not path.exists():
+        return False
+    sops_bin = shutil.which("sops")
+    if not sops_bin:
+        return False
+    try:
+        proc = subprocess.run(
+            [sops_bin, "--decrypt", "--input-type", "dotenv",
+             "--output-type", "dotenv", str(path)],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        values = dotenv_values(stream=io.StringIO(proc.stdout))
+    except Exception:
+        return False
+    for key, value in values.items():
+        if value is None:
+            continue
+        if override or key not in os.environ:
+            os.environ[key] = value
+    _sanitize_loaded_credentials()
+    return True
+
+
 def load_hermes_dotenv(
     *,
     hermes_home: str | os.PathLike | None = None,
@@ -148,14 +187,17 @@ def load_hermes_dotenv(
 
     Behavior:
     - `~/.hermes/.env` overrides stale shell-exported values when present.
+    - if `.env` is absent, fall back to SOPS-encrypted `~/.hermes/secrets.env`
+      (decrypted via stdin to dotenv_values; plaintext never written to disk).
     - project `.env` acts as a dev fallback and only fills missing values when
-      the user env exists.
+      a user env (plaintext or sops) was loaded.
     - if no user env exists, the project `.env` also overrides stale shell vars.
     """
     loaded: list[Path] = []
 
     home_path = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))
     user_env = home_path / ".env"
+    user_sops_env = home_path / "secrets.env"
     project_env_path = Path(project_env) if project_env else None
 
     # Fix corrupted .env files before python-dotenv parses them (#8908).
@@ -167,6 +209,9 @@ def load_hermes_dotenv(
     if user_env.exists():
         _load_dotenv_with_fallback(user_env, override=True)
         loaded.append(user_env)
+    elif user_sops_env.exists():
+        if _load_sops_secrets_env(user_sops_env, override=True):
+            loaded.append(user_sops_env)
 
     if project_env_path and project_env_path.exists():
         _load_dotenv_with_fallback(project_env_path, override=not loaded)

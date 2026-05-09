@@ -51,6 +51,30 @@ _AZURE_OPENAI_PROBE_API_VERSIONS = (
 # ``agent/anthropic_adapter.py`` when building the Anthropic client.
 _AZURE_ANTHROPIC_API_VERSION = "2025-04-15"
 
+# Hostname suffixes considered legitimate Azure/Microsoft endpoints.
+# Used as a guardrail before sending API keys during auto-detection.
+_AZURE_HOST_SUFFIXES = (
+    ".openai.azure.com",
+    ".azure.com",
+    ".azure-api.net",
+    ".cognitiveservices.azure.com",
+    ".ai.azure.com",
+    ".azurewebsites.net",
+)
+
+
+def _is_azure_host(hostname: str) -> bool:
+    """Return True when *hostname* looks like a Microsoft Azure endpoint.
+
+    This is a best-effort guardrail, not a security boundary.  It blocks
+    obviously non-Azure URLs during the interactive setup wizard to prevent
+    accidental (or malicious) credential exfiltration.
+    """
+    h = hostname.lower().strip()
+    if not h:
+        return False
+    return any(h.endswith(suffix) or h == suffix.lstrip(".") for suffix in _AZURE_HOST_SUFFIXES)
+
 
 @dataclass
 class DetectionResult:
@@ -233,6 +257,15 @@ def detect(base_url: str, api_key: str) -> DetectionResult:
         result.hostname = (parsed.hostname or "").lower()
     except Exception:
         result.hostname = ""
+
+    # Guardrail: refuse to send API keys to non-Azure hosts during auto-detection.
+    if not _is_azure_host(result.hostname):
+        result.reason = (
+            f"Hostname '{result.hostname}' does not match known Azure domains — "
+            "skipping auto-detection to protect credentials. "
+            "Please select the API mode manually."
+        )
+        return result
 
     # 1. Path sniff.  Azure Foundry exposes Anthropic-style deployments
     #    under a dedicated ``/anthropic`` path.

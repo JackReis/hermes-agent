@@ -2808,11 +2808,26 @@ class SlackAdapter(BasePlatformAdapter):
         except Exception:
             return False
 
+    def _is_slack_file_url(self, url: str) -> bool:
+        """Validate that a URL is a legitimate Slack domain before sending auth tokens."""
+        from urllib.parse import urlparse
+        try:
+            hostname = urlparse(url).hostname or ""
+            hostname = hostname.lower()
+            return hostname.endswith(".slack.com") or hostname == "slack.com"
+        except Exception:
+            return False
+
     async def _download_slack_file(self, url: str, ext: str, audio: bool = False, team_id: str = "") -> str:
         """Download a Slack file using the bot token for auth, with retry."""
         import httpx
 
         bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token
+
+        if not self._is_slack_file_url(url):
+            raise ValueError(
+                f"Refusing to download file from non-Slack URL: {url[:80]}"
+            )
 
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             for attempt in range(3):
@@ -2856,6 +2871,11 @@ class SlackAdapter(BasePlatformAdapter):
         import httpx
 
         bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token
+
+        if not self._is_slack_file_url(url):
+            raise ValueError(
+                f"Refusing to download file from non-Slack URL: {url[:80]}"
+            )
 
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             for attempt in range(3):
