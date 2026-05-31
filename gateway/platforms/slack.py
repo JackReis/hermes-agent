@@ -17,6 +17,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Any, Tuple, List
+from urllib.parse import urlparse
 
 try:
     from slack_bolt.async_app import AsyncApp
@@ -51,6 +52,21 @@ from gateway.platforms.base import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_slack_file_url(url: str) -> bool:
+    """Return True only for Slack-hosted file URLs.
+
+    Slack private file downloads require a bot token in the Authorization
+    header. Never attach that token to arbitrary URLs supplied in event
+    payloads; validate the hostname first to avoid token exfiltration.
+    """
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except Exception:
+        return False
+    return host == "slack.com" or host.endswith(".slack.com")
 
 # ContextVar carrying the user_id of the slash-command invoker.
 # Set in _handle_slash_command, read in send() to match the correct
@@ -2891,6 +2907,9 @@ class SlackAdapter(BasePlatformAdapter):
         """Download a Slack file using the bot token for auth, with retry."""
         import httpx
 
+        if not _is_slack_file_url(url):
+            raise ValueError(f"Refusing to send Slack bot token to non-Slack file URL: {safe_url_for_log(url)}")
+
         bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token
 
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
@@ -2933,6 +2952,9 @@ class SlackAdapter(BasePlatformAdapter):
     async def _download_slack_file_bytes(self, url: str, team_id: str = "") -> bytes:
         """Download a Slack file and return raw bytes, with retry."""
         import httpx
+
+        if not _is_slack_file_url(url):
+            raise ValueError(f"Refusing to send Slack bot token to non-Slack file URL: {safe_url_for_log(url)}")
 
         bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token
 

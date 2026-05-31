@@ -198,9 +198,9 @@ def test_http_get_json_on_urlerror_returns_zero_none():
 def test_http_get_json_on_http_error_returns_code_none():
     """HTTP 4xx/5xx returns (code, None)."""
     import urllib.error
-    err = urllib.error.HTTPError("https://x/", 403, "Forbidden", {}, None)
+    err = urllib.error.HTTPError("https://x.openai.azure.com/", 403, "Forbidden", {}, None)
     with patch("hermes_cli.azure_detect.urllib_request.urlopen", side_effect=err):
-        status, body = azure_detect._http_get_json("https://x/", "k")
+        status, body = azure_detect._http_get_json("https://x.openai.azure.com/", "k")
     assert status == 403
     assert body is None
 

@@ -269,6 +269,52 @@ class TestSendMessageTool:
             force_document=False,
         )
 
+    def test_discord_uses_split_profile_config_when_main_home_has_no_discord(self, tmp_path, monkeypatch):
+        profile_home = tmp_path / "discord-profile"
+        profile_home.mkdir()
+        (profile_home / ".env").write_text("DISCORD_BOT_TOKEN=split-token\n", encoding="utf-8")
+        (profile_home / "config.yaml").write_text(
+            "platforms:\n"
+            "  discord:\n"
+            "    enabled: true\n"
+            "    home_channel:\n"
+            "      chat_id: '1493133989303681064'\n"
+            "      name: bots\n",
+            encoding="utf-8",
+        )
+        config = SimpleNamespace(platforms={}, get_home_channel=lambda _platform: None)
+        monkeypatch.setenv("HERMES_MESSAGING_PROFILE_HOMES", str(profile_home))
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True):
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "discord",
+                        "message": "hello wings",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert "1493133989303681064" in result["note"]
+        sent_cfg = send_mock.await_args.args[1]
+        assert sent_cfg.token == "split-token"
+        assert sent_cfg.extra["source_home"] == str(profile_home)
+        send_mock.assert_awaited_once_with(
+            Platform.DISCORD,
+            sent_cfg,
+            "1493133989303681064",
+            "hello wings",
+            thread_id=None,
+            media_files=[],
+            force_document=False,
+        )
+
     def test_resolved_slack_thread_name_preserves_thread_id(self):
         slack_cfg = SimpleNamespace(enabled=True, token="xoxb-test", extra={})
         config = SimpleNamespace(

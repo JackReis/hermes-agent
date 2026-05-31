@@ -8,7 +8,9 @@ action="list" and for resolving human-friendly channel names to numeric IDs.
 
 import json
 import logging
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hermes_cli.config import get_hermes_home
@@ -17,6 +19,67 @@ from utils import atomic_json_write
 logger = logging.getLogger(__name__)
 
 DIRECTORY_PATH = get_hermes_home() / "channel_directory.json"
+
+
+def _extra_directory_paths() -> List[Path]:
+    """Return additional channel-directory caches to merge for split gateways.
+
+    Some installs intentionally split platforms across Hermes homes (for
+    example, a main gateway in ``~/.hermes`` plus an isolated Discord/Wings
+    gateway in ``~/.hermes-discord-bot``).  ``send_message(action='list')``
+    runs in the caller's active home, so merge explicitly configured sibling
+    caches when reading the directory.
+    """
+    paths: List[Path] = []
+    raw = os.getenv("HERMES_CHANNEL_DIRECTORY_PATHS", "").strip()
+    for part in raw.split(os.pathsep):
+        part = part.strip()
+        if part:
+            paths.append(Path(part).expanduser())
+
+    # Jack's/Wings split-service lane and a useful default for isolated
+    # Discord bot profiles. Only enable this when the active directory is the
+    # canonical ~/.hermes cache; tests and profile-local callers should not
+    # accidentally merge a user's real machine state.
+    try:
+        canonical = Path.home() / ".hermes" / "channel_directory.json"
+        if DIRECTORY_PATH.expanduser() == canonical:
+            paths.append(Path.home() / ".hermes-discord-bot" / "channel_directory.json")
+    except Exception:
+        pass
+
+    primary = DIRECTORY_PATH.expanduser()
+    deduped: List[Path] = []
+    seen: set[str] = {str(primary)}
+    for path in paths:
+        expanded = path.expanduser()
+        key = str(expanded)
+        if key not in seen:
+            deduped.append(expanded)
+            seen.add(key)
+    return deduped
+
+
+def _merge_directories(primary: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge an extra channel directory into ``primary`` by platform + id."""
+    platforms = primary.setdefault("platforms", {})
+    for platform_name, channels in (extra.get("platforms") or {}).items():
+        if not isinstance(channels, list):
+            continue
+        existing = platforms.setdefault(platform_name, [])
+        seen_ids = {str(ch.get("id")) for ch in existing if isinstance(ch, dict) and ch.get("id") is not None}
+        for channel in channels:
+            if not isinstance(channel, dict):
+                continue
+            channel_id = channel.get("id")
+            if channel_id is not None and str(channel_id) in seen_ids:
+                continue
+            existing.append(channel)
+            if channel_id is not None:
+                seen_ids.add(str(channel_id))
+    if not primary.get("updated_at"):
+        primary["updated_at"] = extra.get("updated_at")
+    return primary
 
 
 def _normalize_channel_query(value: str) -> str:
@@ -247,12 +310,23 @@ def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
 def load_directory() -> Dict[str, Any]:
     """Load the cached channel directory from disk."""
     if not DIRECTORY_PATH.exists():
-        return {"updated_at": None, "platforms": {}}
-    try:
-        with open(DIRECTORY_PATH, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {"updated_at": None, "platforms": {}}
+        directory = {"updated_at": None, "platforms": {}}
+    else:
+        try:
+            with open(DIRECTORY_PATH, encoding="utf-8") as f:
+                directory = json.load(f)
+        except Exception:
+            directory = {"updated_at": None, "platforms": {}}
+
+    for path in _extra_directory_paths():
+        if not path.exists():
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                directory = _merge_directories(directory, json.load(f))
+        except Exception:
+            continue
+    return directory
 
 
 def lookup_channel_type(platform_name: str, chat_id: str) -> Optional[str]:

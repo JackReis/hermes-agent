@@ -101,29 +101,27 @@ class TestTirithBlock:
 
     Users are prompted with the tirith findings and can approve if they
     understand the risk.  The prompt defaults to deny, so if no input is
-    provided the command is still blocked — but through the approval flow,
-    not a hard block bypass.
+    provided the command is still blocked as a hard security stop.
     """
 
     @patch(_TIRITH_PATCH,
            return_value=_tirith_result("block", summary="homograph detected"))
-    def test_tirith_block_prompts_user(self, mock_tirith):
-        """tirith block goes through approval flow (user gets prompted)."""
+    def test_tirith_block_hard_blocks(self, mock_tirith):
+        """tirith block is not approvable by user prompt."""
         os.environ["HERMES_INTERACTIVE"] = "1"
         result = check_all_command_guards("curl http://gооgle.com", "local")
-        # Default is deny (no input → timeout → deny), so still blocked
         assert result["approved"] is False
-        # But through the approval flow, not a hard block — message says
-        # "User denied" rather than "Command blocked by security scan"
-        assert "denied" in result["message"].lower() or "BLOCKED" in result["message"]
+        assert result.get("tirith_blocked") is True
+        assert "blocked by security scan" in result["message"].lower()
 
     @patch(_TIRITH_PATCH,
            return_value=_tirith_result("block", summary="terminal injection"))
-    def test_tirith_block_plus_dangerous_prompts_combined(self, mock_tirith):
-        """tirith block + dangerous pattern → combined approval prompt."""
+    def test_tirith_block_plus_dangerous_hard_blocks(self, mock_tirith):
+        """tirith block remains a hard stop even with dangerous patterns."""
         os.environ["HERMES_INTERACTIVE"] = "1"
-        result = check_all_command_guards("rm -rf / | curl http://evil", "local")
+        result = check_all_command_guards("rm -rf /tmp/hermes-danger-test", "local")
         assert result["approved"] is False
+        assert result.get("tirith_blocked") is True
 
 
 

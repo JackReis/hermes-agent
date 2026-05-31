@@ -13,6 +13,7 @@ import re
 import ssl
 import time
 from email.utils import formatdate
+from pathlib import Path
 from typing import Dict, Optional
 
 from agent.redact import redact_sensitive_text
@@ -166,6 +167,98 @@ def _handle_list():
         return json.dumps(_error(f"Failed to load channel directory: {e}"))
 
 
+def _read_env_file(path: Path) -> Dict[str, str]:
+    """Read simple KEY=VALUE entries without exporting or logging secrets."""
+    values: Dict[str, str] = {}
+    if not path.exists():
+        return values
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                values[key] = value
+    except Exception:
+        return {}
+    return values
+
+
+def _candidate_profile_homes(platform_name: str) -> list[Path]:
+    """Return profile homes that may own a split messaging platform."""
+    homes: list[Path] = []
+    raw = os.getenv("HERMES_MESSAGING_PROFILE_HOMES", "").strip()
+    for part in raw.split(os.pathsep):
+        part = part.strip()
+        if part:
+            homes.append(Path(part).expanduser())
+
+    if platform_name == "discord":
+        homes.append(Path.home() / ".hermes-discord-bot")
+
+    active_home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
+    deduped: list[Path] = []
+    seen = {str(active_home)}
+    for home in homes:
+        key = str(home)
+        if key not in seen:
+            deduped.append(home)
+            seen.add(key)
+    return deduped
+
+
+def _load_split_profile_platform_config(platform_name: str, platform):
+    """Load a PlatformConfig from an isolated messaging profile if present.
+
+    This supports split-service setups where the caller's active HERMES_HOME is
+    the main gateway but a platform such as Discord/Wings is intentionally run
+    from a sibling profile with its own token and home channel.
+    """
+    try:
+        import yaml
+        from gateway.config import HomeChannel, PlatformConfig
+    except Exception:
+        return None
+
+    env_key = f"{platform_name.upper()}_BOT_TOKEN"
+    home_env_key = f"{platform_name.upper()}_HOME_CHANNEL"
+    name_env_key = f"{platform_name.upper()}_HOME_CHANNEL_NAME"
+
+    for home in _candidate_profile_homes(platform_name):
+        env_values = _read_env_file(home / ".env")
+        token = env_values.get(env_key, "").strip()
+        if not token:
+            continue
+        try:
+            config_data = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
+        except Exception:
+            config_data = {}
+        platform_data = ((config_data.get("platforms") or {}).get(platform_name) or {})
+        home_data = platform_data.get("home_channel") or {}
+
+        chat_id = str(home_data.get("chat_id") or env_values.get(home_env_key, "")).strip()
+        name = str(home_data.get("name") or env_values.get(name_env_key, platform_name)).strip()
+        thread_id = home_data.get("thread_id") or env_values.get(f"{platform_name.upper()}_HOME_CHANNEL_THREAD_ID")
+        home_channel = None
+        if chat_id:
+            home_channel = HomeChannel(
+                platform=platform,
+                chat_id=chat_id,
+                name=name or platform_name,
+                thread_id=str(thread_id) if thread_id else None,
+            )
+        return PlatformConfig(
+            enabled=True,
+            token=token,
+            home_channel=home_channel,
+            extra={"source_home": str(home)},
+        )
+    return None
+
+
 def _handle_send(args):
     """Send a message to a platform target."""
     target = args.get("target", "")
@@ -220,10 +313,13 @@ def _handle_send(args):
         return tool_error(f"Unknown platform: {platform_name}")
 
     pconfig = config.platforms.get(platform)
-    if not pconfig or not pconfig.enabled:
+    if not pconfig or not pconfig.enabled or (platform_name == "discord" and not pconfig.token):
+        split_pconfig = _load_split_profile_platform_config(platform_name, platform)
+        if split_pconfig:
+            pconfig = split_pconfig
         # Weixin can be configured purely via .env; synthesize a pconfig so
         # send_message and cron delivery work without a gateway.yaml entry.
-        if platform_name == "weixin":
+        elif platform_name == "weixin":
             wx_token = os.getenv("WEIXIN_TOKEN", "").strip()
             wx_account = os.getenv("WEIXIN_ACCOUNT_ID", "").strip()
             if wx_token and wx_account:
@@ -257,6 +353,8 @@ def _handle_send(args):
     used_home_channel = False
     if not chat_id:
         home = config.get_home_channel(platform)
+        if not home and pconfig and pconfig.home_channel:
+            home = pconfig.home_channel
         if not home and platform_name == "weixin":
             wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
             if wx_home:
@@ -395,6 +493,9 @@ def _parse_target_ref(platform_name: str, target_ref: str):
     # Matrix room IDs (start with !) and user IDs (start with @) are explicit
     if platform_name == "matrix" and (target_ref.startswith("!") or target_ref.startswith("@")):
         return target_ref, None, True
+    # Email addresses are explicit targets (user@domain.tld)
+    if platform_name == "email" and re.match(r"^[\w.-]+@[\w.-]+\.\w+$", target_ref.strip()):
+        return target_ref.strip(), None, True
     # XMPP JIDs (user@server or room@conference.server) are explicit
     if platform_name == "xmpp" and "@" in target_ref:
         return target_ref, None, True

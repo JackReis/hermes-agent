@@ -42,6 +42,23 @@ class TestLoadDirectory:
             result = load_directory()
         assert result["platforms"]["telegram"][0]["name"] == "John"
 
+    def test_merges_explicit_extra_directory_paths(self, tmp_path, monkeypatch):
+        primary_home = tmp_path / "primary"
+        primary_home.mkdir(parents=True)
+        primary = _write_directory(primary_home, {
+            "email": [{"id": "a@example.com", "name": "Alice", "type": "dm"}]
+        })
+        extra_home = tmp_path / "discord"
+        extra_home.mkdir(parents=True)
+        extra = _write_directory(extra_home, {
+            "discord": [{"id": "1493133989303681064", "name": "bots", "guild": "jaggo", "type": "channel"}]
+        })
+        monkeypatch.setenv("HERMES_CHANNEL_DIRECTORY_PATHS", str(extra))
+        with patch("gateway.channel_directory.DIRECTORY_PATH", primary):
+            result = load_directory()
+        assert result["platforms"]["email"][0]["name"] == "Alice"
+        assert result["platforms"]["discord"][0]["name"] == "bots"
+
     def test_corrupt_file(self, tmp_path):
         cache_file = tmp_path / "channel_directory.json"
         cache_file.write_text("{bad json")

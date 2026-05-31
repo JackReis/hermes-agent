@@ -61,6 +61,29 @@ _AZURE_OPENAI_PROBE_API_VERSIONS = (
 # ``agent/anthropic_adapter.py`` when building the Anthropic client.
 _AZURE_ANTHROPIC_API_VERSION = "2025-04-15"
 
+_AZURE_ALLOWED_HOST_SUFFIXES = (
+    ".openai.azure.com",
+    ".services.ai.azure.com",
+    ".azure.com",
+    ".azure.us",
+    ".azure.cn",
+    ".microsoft.com",
+)
+
+
+def _is_azure_host(url: str) -> bool:
+    """Return True only for Azure/Microsoft-hosted endpoint URLs.
+
+    Azure detection sends the user's API key as both ``api-key`` and
+    ``Authorization`` headers. Validate the host before probing so a typo or
+    malicious endpoint cannot exfiltrate credentials.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
+    except Exception:
+        return False
+    return any(host.endswith(suffix) for suffix in _AZURE_ALLOWED_HOST_SUFFIXES)
+
 
 @dataclass
 class DetectionResult:
@@ -153,6 +176,10 @@ def _http_get_json(url: str,
                    ) -> tuple[int, Optional[dict]]:
     """GET a URL with the appropriate auth headers.  Return
     ``(status_code, parsed_json_or_None)``.  Never raises."""
+    if not _is_azure_host(url):
+        logger.warning("azure_detect: refusing to send API key to non-Azure host: %s", url)
+        return 0, None
+
     token, mode = _resolve_credential(api_key, token_provider)
     req = urllib_request.Request(url, method="GET")
     _apply_auth_headers(req, token, mode)
@@ -257,6 +284,10 @@ def _probe_anthropic_messages(base_url: str,
     """
     base = _strip_trailing_v1(base_url)
     url = f"{base}/v1/messages?api-version={_AZURE_ANTHROPIC_API_VERSION}"
+    if not _is_azure_host(url):
+        logger.warning("azure_detect: refusing to send API key to non-Azure host: %s", url)
+        return False
+
     payload = json.dumps({
         "model": "probe",
         "max_tokens": 1,
