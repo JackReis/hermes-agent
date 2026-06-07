@@ -1360,6 +1360,10 @@ def _build_mission_control_forest(status: Dict[str, Any]) -> Dict[str, Any]:
     tailscale_state = tailscale.get("state", "unknown")
     if "stopped" in str(tailscale.get("detail", "")).lower():
         tailscale_state = "down"
+    tailscale_serve = _mission_control_run_command(["tailscale", "serve", "status"])
+    tailscale_serve_state = tailscale_serve.get("state", "unknown")
+    if "stopped" in str(tailscale_serve.get("detail", "")).lower():
+        tailscale_serve_state = "down"
     remote_access = [
         {
             "id": "dashboard_direct",
@@ -1383,12 +1387,21 @@ def _build_mission_control_forest(status: Dict[str, Any]) -> Dict[str, Any]:
             "url": "http://127.0.0.1:8082/sinew/api/sinew",
         },
         {
-            "id": "tailscale",
+            "id": "tailscale_status",
             "name": "Tailscale",
             "state": tailscale_state,
             "ok": tailscale.get("ok", False),
             "status_code": None,
             "detail": tailscale.get("detail", "not checked"),
+            "url": "tailscale status",
+        },
+        {
+            "id": "tailscale",
+            "name": "Tailscale Serve",
+            "state": tailscale_serve_state,
+            "ok": tailscale_serve.get("ok", False),
+            "status_code": None,
+            "detail": tailscale_serve.get("detail", "not checked"),
             "url": "tailscale serve status",
         },
     ]

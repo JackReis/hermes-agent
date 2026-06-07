@@ -317,6 +317,13 @@ class TestWebServerEndpoints:
                     "detail": "Tailscale is stopped.",
                     "state": "down",
                 }
+            if command[:3] == ["tailscale", "serve", "status"]:
+                return {
+                    "ok": False,
+                    "returncode": 1,
+                    "detail": "Tailscale is stopped.",
+                    "state": "down",
+                }
             return {
                 "ok": False,
                 "returncode": 1,
