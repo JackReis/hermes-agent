@@ -251,6 +251,8 @@ export async function buildWsUrl(
 
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getMissionControlForest: () =>
+    fetchJSON<MissionControlForestResponse>("/api/mission-control/forest"),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).
    *
@@ -1400,6 +1402,103 @@ export interface StatusResponse {
   latest_config_version: number;
   release_date: string;
   version: string;
+}
+
+export type MissionControlState =
+  | "live"
+  | "fresh"
+  | "degraded"
+  | "down"
+  | "stale"
+  | "missing"
+  | "unknown";
+
+export interface MissionControlSummary {
+  state: MissionControlState;
+  primary_issue: string;
+  unhealthy_count: number;
+}
+
+export interface MissionControlNode {
+  id: string;
+  name: string;
+  state: MissionControlState;
+  owner?: string;
+  role?: string;
+  detail?: string;
+  depends_on?: string[];
+  metrics?: Record<string, number | string>;
+  verifier?: string;
+  containers?: Array<Record<string, string>>;
+}
+
+export interface MissionControlChannel {
+  id: string;
+  name: string;
+  state: MissionControlState;
+  canonicality: string;
+  owner: string;
+  detail: string;
+  risk: string;
+}
+
+export interface MissionControlRemoteAccess {
+  id: string;
+  name: string;
+  state: MissionControlState;
+  ok?: boolean;
+  status_code?: number | null;
+  detail?: string;
+  url: string;
+}
+
+export interface MissionControlAgentLane {
+  pane?: string;
+  role?: string;
+  command?: string;
+  title?: string;
+  peer?: string;
+  status?: string;
+  visibility?: string;
+}
+
+export interface MissionControlOwnershipRule {
+  owner: string;
+  owns: string;
+  boundary: string;
+}
+
+export interface MissionControlForestResponse {
+  generated_at: string;
+  summary: MissionControlSummary;
+  infrastructure: {
+    nodes: MissionControlNode[];
+    edges: Array<{ from: string; to: string }>;
+  };
+  channels: MissionControlChannel[];
+  remote_access: MissionControlRemoteAccess[];
+  agent_lanes: {
+    tmux_panes: MissionControlAgentLane[];
+    agent_work_map: MissionControlAgentLane[];
+    bifrost_registry: Record<string, string>;
+  };
+  context: {
+    live_surface_feed: {
+      path?: string;
+      state: MissionControlState;
+      detail?: string;
+      generated_at?: string;
+      mtime?: string;
+      age_seconds?: number;
+      active_pane_count?: number;
+      web_surface_count?: number;
+    };
+    latest_pointer: Record<string, string>;
+    latest_handoffs: Array<Record<string, string>>;
+    pending_actions: Array<Record<string, string>>;
+    pickup_target: Record<string, string>;
+  };
+  ownership: MissionControlOwnershipRule[];
 }
 
 export interface SessionInfo {

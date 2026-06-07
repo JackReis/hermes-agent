@@ -851,6 +851,609 @@ async def get_status():
     }
 
 
+_MISSION_CONTROL_LIVE_SURFACES_PATH = (
+    Path.home() / ".fleet-dashboard" / "ai-start-live-surfaces.json"
+)
+_MISSION_CONTROL_PROBE_TIMEOUT_SECONDS = 1.0
+
+
+def _mission_control_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _mission_control_first_line(text: object, fallback: str = "no output") -> str:
+    if text is None:
+        return fallback
+    cleaned = re.sub(r"\s+", " ", str(text)).strip()
+    if not cleaned:
+        return fallback
+    return cleaned[:220]
+
+
+def _mission_control_run_command(
+    command: List[str],
+    timeout: float = _MISSION_CONTROL_PROBE_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    """Run one allowlisted local probe and return redacted status metadata."""
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "state": "unknown",
+            "returncode": None,
+            "stdout": "",
+            "stderr": "",
+            "detail": f"{command[0]} not found",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "state": "unknown",
+            "returncode": None,
+            "stdout": "",
+            "stderr": "",
+            "detail": f"{command[0]} timed out",
+        }
+
+    detail = _mission_control_first_line(
+        completed.stdout or completed.stderr,
+        fallback=f"exit {completed.returncode}",
+    )
+    return {
+        "ok": completed.returncode == 0,
+        "state": "live" if completed.returncode == 0 else "down",
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "detail": detail,
+    }
+
+
+def _mission_control_probe_http(
+    url: str,
+    timeout: float = _MISSION_CONTROL_PROBE_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ok = 200 <= resp.status < 400
+            return {
+                "ok": ok,
+                "state": "live" if ok else "degraded",
+                "status_code": resp.status,
+                "detail": f"HTTP {resp.status}",
+            }
+    except urllib.error.HTTPError as exc:
+        return {
+            "ok": False,
+            "state": "degraded",
+            "status_code": exc.code,
+            "detail": f"HTTP {exc.code}",
+        }
+    except urllib.error.URLError as exc:
+        return {
+            "ok": False,
+            "state": "down",
+            "status_code": None,
+            "detail": _mission_control_first_line(getattr(exc, "reason", exc)),
+        }
+    except TimeoutError:
+        return {
+            "ok": False,
+            "state": "down",
+            "status_code": None,
+            "detail": "timed out",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "state": "unknown",
+            "status_code": None,
+            "detail": type(exc).__name__,
+        }
+
+
+def _mission_control_probe_json(
+    url: str,
+    timeout: float = _MISSION_CONTROL_PROBE_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(1_000_000)
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+            body_ok = not (isinstance(body, dict) and body.get("ok") is False)
+            ok = 200 <= resp.status < 400 and body_ok
+            detail = f"HTTP {resp.status}"
+            if isinstance(body, dict):
+                detail = _mission_control_first_line(
+                    body.get("error") or body.get("status") or detail,
+                    fallback=detail,
+                )
+            return {
+                "ok": ok,
+                "state": "live" if ok else "degraded",
+                "status_code": resp.status,
+                "body": body if isinstance(body, dict) else None,
+                "detail": detail,
+            }
+    except urllib.error.HTTPError as exc:
+        return {
+            "ok": False,
+            "state": "degraded",
+            "status_code": exc.code,
+            "body": None,
+            "detail": f"HTTP {exc.code}",
+        }
+    except urllib.error.URLError as exc:
+        return {
+            "ok": False,
+            "state": "down",
+            "status_code": None,
+            "body": None,
+            "detail": _mission_control_first_line(getattr(exc, "reason", exc)),
+        }
+    except TimeoutError:
+        return {
+            "ok": False,
+            "state": "down",
+            "status_code": None,
+            "body": None,
+            "detail": "timed out",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "state": "unknown",
+            "status_code": None,
+            "body": None,
+            "detail": type(exc).__name__,
+        }
+
+
+def _mission_control_docker_socket_exists() -> bool:
+    return (Path.home() / ".orbstack" / "run" / "docker.sock").exists()
+
+
+def _mission_control_orbstack_node() -> Dict[str, Any]:
+    probe = _mission_control_run_command(["orb", "status"])
+    detail = probe.get("detail", "")
+    if "running" in detail.lower():
+        state = "live"
+    elif "stopped" in detail.lower():
+        state = "down"
+    else:
+        state = "live" if probe.get("ok") else probe.get("state", "unknown")
+    return {
+        "id": "orbstack",
+        "name": "OrbStack",
+        "state": state,
+        "owner": "OrbStack",
+        "role": "Docker VM substrate",
+        "detail": detail,
+        "verifier": "orb status",
+    }
+
+
+def _mission_control_parse_docker_containers(stdout: str) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        rows.append({
+            "name": parts[0] if len(parts) > 0 else line.strip(),
+            "status": parts[1] if len(parts) > 1 else "",
+            "ports": parts[2] if len(parts) > 2 else "",
+        })
+    return rows
+
+
+def _mission_control_docker_state() -> tuple[Dict[str, Any], List[Dict[str, str]]]:
+    socket_exists = _mission_control_docker_socket_exists()
+    if not socket_exists:
+        return (
+            {
+                "id": "docker_socket",
+                "name": "Docker socket",
+                "state": "down",
+                "owner": "OrbStack",
+                "role": "Container runtime access",
+                "detail": "~/.orbstack/run/docker.sock missing",
+                "depends_on": ["orbstack"],
+                "verifier": "test -S ~/.orbstack/run/docker.sock",
+            },
+            [],
+        )
+
+    probe = _mission_control_run_command([
+        "docker",
+        "ps",
+        "--format",
+        "{{.Names}}\t{{.Status}}\t{{.Ports}}",
+    ])
+    containers = _mission_control_parse_docker_containers(probe.get("stdout", ""))
+    return (
+        {
+            "id": "docker_socket",
+            "name": "Docker socket",
+            "state": "live" if probe.get("ok") else "down",
+            "owner": "OrbStack",
+            "role": "Container runtime access",
+            "detail": probe.get("detail", "docker ps unavailable"),
+            "depends_on": ["orbstack"],
+            "verifier": "docker ps",
+        },
+        containers,
+    )
+
+
+def _mission_control_container_state(
+    containers: List[Dict[str, str]],
+    names: set[str],
+) -> tuple[str, str]:
+    matches = [row for row in containers if row.get("name") in names]
+    if not matches:
+        return "down", "container not listed"
+    running = [row for row in matches if "up" in row.get("status", "").lower()]
+    if running:
+        return "live", running[0].get("status", "running")
+    return "degraded", matches[0].get("status", "listed but not running")
+
+
+def _mission_control_sinew_node(probe: Dict[str, Any]) -> Dict[str, Any]:
+    body = probe.get("body") if isinstance(probe.get("body"), dict) else {}
+    metrics: Dict[str, Any] = {}
+    if isinstance(body, dict) and isinstance(body.get("message_count"), int):
+        metrics["message_count"] = body["message_count"]
+    return {
+        "id": "sinew",
+        "name": "Sinew projection",
+        "state": probe.get("state", "unknown"),
+        "owner": "Fleet Dashboard",
+        "role": "Matrix projection evidence",
+        "detail": probe.get("detail", "not checked"),
+        "depends_on": ["conduit"],
+        "metrics": metrics,
+        "verifier": "curl http://127.0.0.1:8081/api/sinew",
+    }
+
+
+def _mission_control_live_surface_feed() -> tuple[Dict[str, Any], Dict[str, Any]]:
+    path = _MISSION_CONTROL_LIVE_SURFACES_PATH
+    if not path.exists():
+        return (
+            {
+                "path": str(path),
+                "state": "missing",
+                "detail": "live-surface export missing",
+            },
+            {},
+        )
+
+    try:
+        data = json.loads(path.read_text())
+    except Exception as exc:
+        return (
+            {
+                "path": str(path),
+                "state": "degraded",
+                "detail": type(exc).__name__,
+            },
+            {},
+        )
+
+    mtime = path.stat().st_mtime
+    age_seconds = max(0, int(time.time() - mtime))
+    state = "fresh" if age_seconds <= 600 else "stale"
+    return (
+        {
+            "path": str(path),
+            "state": state,
+            "generated_at": data.get("generated_at"),
+            "mtime": datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
+            "age_seconds": age_seconds,
+            "active_pane_count": len(data.get("active_panes") or []),
+            "web_surface_count": len(data.get("web_surfaces") or []),
+        },
+        data,
+    )
+
+
+def _mission_control_trim_agent_lanes(data: Dict[str, Any]) -> Dict[str, Any]:
+    panes = []
+    for row in (data.get("active_panes") or [])[:20]:
+        panes.append({
+            "pane": row.get("pane", ""),
+            "role": row.get("role") or row.get("title") or "unknown",
+            "command": row.get("command", ""),
+            "title": row.get("title", ""),
+        })
+
+    work_map = []
+    for row in (data.get("agent_work_map") or [])[:16]:
+        work_map.append({
+            "peer": row.get("Peer", ""),
+            "status": row.get("Status", ""),
+            "visibility": row.get("Visibility", ""),
+            "pane": row.get("Pane", ""),
+            "role": row.get("Role", ""),
+        })
+
+    return {
+        "tmux_panes": panes,
+        "agent_work_map": work_map,
+        "bifrost_registry": data.get("bifrost_registry") or {},
+    }
+
+
+def _mission_control_context(data: Dict[str, Any], feed: Dict[str, Any]) -> Dict[str, Any]:
+    handoffs = data.get("handoffs") if isinstance(data.get("handoffs"), dict) else {}
+    return {
+        "live_surface_feed": feed,
+        "latest_pointer": handoffs.get("latest_pointer") or {},
+        "latest_handoffs": (handoffs.get("latest_handoffs") or [])[:5],
+        "pending_actions": (handoffs.get("pending_actions") or [])[:6],
+        "pickup_target": handoffs.get("pickup_target") or {},
+    }
+
+
+def _mission_control_platform_state(
+    gateway_platforms: Dict[str, Any],
+    name: str,
+) -> tuple[str, str]:
+    info = gateway_platforms.get(name) or {}
+    state = info.get("state", "")
+    if state == "connected":
+        return "live", "gateway connected"
+    if state == "fatal":
+        return "degraded", info.get("error_message") or "gateway fatal"
+    if state == "disconnected":
+        return "down", "gateway disconnected"
+    return "unknown", "not reported by Hermes gateway"
+
+
+def _mission_control_summary(
+    nodes: List[Dict[str, Any]],
+    remote_access: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    by_id = {node["id"]: node for node in nodes}
+    primary_issue = "No blocking substrate issue detected"
+    if by_id.get("orbstack", {}).get("state") == "down":
+        primary_issue = "OrbStack is stopped"
+    elif by_id.get("docker_socket", {}).get("state") == "down":
+        primary_issue = "Docker socket is unavailable"
+    elif by_id.get("conduit", {}).get("state") != "live":
+        primary_issue = "Conduit is unreachable"
+    elif by_id.get("sinew", {}).get("state") != "live":
+        primary_issue = "Sinew projection is degraded"
+    elif any(row.get("id") == "tailscale" and row.get("state") == "down" for row in remote_access):
+        primary_issue = "Remote access is offline"
+
+    unhealthy = [
+        row for row in [*nodes, *remote_access]
+        if row.get("state") in {"down", "degraded", "stale", "missing"}
+    ]
+    return {
+        "state": "degraded" if unhealthy else "live",
+        "primary_issue": primary_issue,
+        "unhealthy_count": len(unhealthy),
+    }
+
+
+def _build_mission_control_forest(status: Dict[str, Any]) -> Dict[str, Any]:
+    feed, live_data = _mission_control_live_surface_feed()
+    gateway_platforms = status.get("gateway_platforms") or {}
+
+    orbstack = _mission_control_orbstack_node()
+    docker_socket, containers = _mission_control_docker_state()
+    rbitr_state, rbitr_detail = _mission_control_container_state(
+        containers,
+        {"matrix-conduit", "matrix-relay", "mattermost", "mattermost-postgres"},
+    )
+    conduit_probe = _mission_control_probe_json(
+        "http://127.0.0.1:6167/_matrix/client/versions"
+    )
+    matrix_relay = _mission_control_run_command([
+        "launchctl",
+        "print",
+        f"gui/{os.getuid()}/ai.fleet-matrix-relay",
+    ])
+    matrix_relay_state = "live" if matrix_relay.get("ok") else "down"
+    if matrix_relay_state == "live" and conduit_probe.get("state") != "live":
+        matrix_relay_state = "degraded"
+    sinew_probe = _mission_control_probe_json("http://127.0.0.1:8081/api/sinew")
+    mattermost_probe = _mission_control_probe_http(
+        "http://127.0.0.1:8065/api/v4/system/ping"
+    )
+
+    nodes: List[Dict[str, Any]] = [
+        orbstack,
+        docker_socket,
+        {
+            "id": "rbitr_compose",
+            "name": "rbitr compose",
+            "state": rbitr_state,
+            "owner": "rbitr compose",
+            "role": "Conduit, relay, and local chat containers",
+            "detail": rbitr_detail,
+            "depends_on": ["docker_socket"],
+            "containers": containers[:10],
+            "verifier": "docker ps --format '{{.Names}} {{.Status}}'",
+        },
+        {
+            "id": "conduit",
+            "name": "Conduit Matrix homeserver",
+            "state": conduit_probe.get("state", "unknown"),
+            "owner": "rbitr compose",
+            "role": "Local Matrix homeserver",
+            "detail": conduit_probe.get("detail", "not checked"),
+            "depends_on": ["rbitr_compose"],
+            "verifier": "curl http://127.0.0.1:6167/_matrix/client/versions",
+        },
+        {
+            "id": "matrix_relay",
+            "name": "Matrix relay",
+            "state": matrix_relay_state,
+            "owner": "launchd",
+            "role": "Fleet relay process",
+            "detail": matrix_relay.get("detail", "not checked"),
+            "depends_on": ["conduit"],
+            "verifier": "launchctl print gui/$(id -u)/ai.fleet-matrix-relay",
+        },
+        _mission_control_sinew_node(sinew_probe),
+    ]
+
+    telegram_state, telegram_detail = _mission_control_platform_state(
+        gateway_platforms,
+        "telegram",
+    )
+    slack_state, slack_detail = _mission_control_platform_state(gateway_platforms, "slack")
+    channels = [
+        {
+            "id": "matrix",
+            "name": "Matrix",
+            "state": conduit_probe.get("state", "unknown"),
+            "canonicality": "status-fabric",
+            "owner": "Conduit + Matrix relay",
+            "detail": conduit_probe.get("detail", "not checked"),
+            "risk": "Mobile clients need a reachable homeserver URL; localhost rooms stay local-only.",
+        },
+        {
+            "id": "telegram",
+            "name": "Telegram",
+            "state": telegram_state,
+            "canonicality": "operator-ingress",
+            "owner": "Hermes gateway",
+            "detail": telegram_detail,
+            "risk": "One long-poller per bot token; shared tokens create getUpdates conflicts.",
+        },
+        {
+            "id": "mattermost",
+            "name": "Mattermost",
+            "state": mattermost_probe.get("state", "unknown"),
+            "canonicality": "local-chat",
+            "owner": "Docker/OrbStack",
+            "detail": mattermost_probe.get("detail", "not checked"),
+            "risk": "Phone access needs LAN IP or VPN; localhost is Mac-only.",
+        },
+        {
+            "id": "slack",
+            "name": "Slack",
+            "state": slack_state,
+            "canonicality": "disabled-or-placeholder",
+            "owner": "Hermes gateway",
+            "detail": slack_detail,
+            "risk": "Hide as healthy until a real workspace token starts the adapter.",
+        },
+    ]
+
+    sinew_proxy = _mission_control_probe_json("http://127.0.0.1:8082/sinew/api/sinew")
+    tailscale = _mission_control_run_command(["tailscale", "status"])
+    tailscale_state = tailscale.get("state", "unknown")
+    if "stopped" in str(tailscale.get("detail", "")).lower():
+        tailscale_state = "down"
+    remote_access = [
+        {
+            "id": "dashboard_direct",
+            "name": "Local dashboard",
+            **_mission_control_probe_http("http://127.0.0.1:9121/mission-control"),
+            "url": "http://127.0.0.1:9121/mission-control",
+        },
+        {
+            "id": "dashboard_proxy",
+            "name": "Fleet proxy",
+            **_mission_control_probe_http("http://127.0.0.1:8082/mission-control"),
+            "url": "http://127.0.0.1:8082/mission-control",
+        },
+        {
+            "id": "sinew_proxy",
+            "name": "Sinew via proxy",
+            "state": sinew_proxy.get("state", "unknown"),
+            "ok": sinew_proxy.get("ok", False),
+            "status_code": sinew_proxy.get("status_code"),
+            "detail": sinew_proxy.get("detail", "not checked"),
+            "url": "http://127.0.0.1:8082/sinew/api/sinew",
+        },
+        {
+            "id": "tailscale",
+            "name": "Tailscale",
+            "state": tailscale_state,
+            "ok": tailscale.get("ok", False),
+            "status_code": None,
+            "detail": tailscale.get("detail", "not checked"),
+            "url": "tailscale serve status",
+        },
+    ]
+
+    ownership = [
+        {
+            "owner": "OrbStack",
+            "owns": "Docker VM and container substrate",
+            "boundary": "Conduit and Mattermost are unavailable when OrbStack stops.",
+        },
+        {
+            "owner": "rbitr compose",
+            "owns": "Conduit homeserver and Matrix relay containers",
+            "boundary": "Do not unpark legacy Conduit launchd without an OrbStack readiness gate.",
+        },
+        {
+            "owner": "Hermes",
+            "owns": "Mission Control, gateway adapters, and operator chat",
+            "boundary": "Gateway state is evidence, not the canonical task ledger.",
+        },
+        {
+            "owner": "Caddy",
+            "owns": "Local proxy routes for Mission Control, Sinew, Codex, and Hermes portal",
+            "boundary": "Remote Host headers and Tailscale are separate access checks.",
+        },
+        {
+            "owner": "Vault + OB1",
+            "owns": "Daily note, handoffs, and durable session mirrors",
+            "boundary": "Matrix, Telegram, and Mattermost are transports, not ledgers.",
+        },
+    ]
+
+    return {
+        "generated_at": _mission_control_utc_now(),
+        "summary": _mission_control_summary(nodes, remote_access),
+        "infrastructure": {
+            "nodes": nodes,
+            "edges": [
+                {"from": "orbstack", "to": "docker_socket"},
+                {"from": "docker_socket", "to": "rbitr_compose"},
+                {"from": "rbitr_compose", "to": "conduit"},
+                {"from": "conduit", "to": "matrix_relay"},
+                {"from": "conduit", "to": "sinew"},
+            ],
+        },
+        "channels": channels,
+        "remote_access": remote_access,
+        "agent_lanes": _mission_control_trim_agent_lanes(live_data),
+        "context": _mission_control_context(live_data, feed),
+        "ownership": ownership,
+    }
+
+
+@app.get("/api/mission-control/forest")
+async def get_mission_control_forest():
+    """Aggregate Mission Control's forest-level runtime state.
+
+    The endpoint intentionally returns state summaries, timestamps, and safe
+    verifier hints only. It never returns raw env values or log bodies.
+    """
+    status = await get_status()
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _build_mission_control_forest, status)
+
+
 @app.get("/api/system/stats")
 async def get_system_stats():
     """Host + process system stats for the System page.

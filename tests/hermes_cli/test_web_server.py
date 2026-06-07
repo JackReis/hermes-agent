@@ -243,6 +243,174 @@ class TestWebServerEndpoints:
         assert "hermes_home" in data
         assert "active_sessions" in data
 
+    def test_get_mission_control_forest_explains_substrate_outage(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Mission Control needs dependency state, not only adapter state."""
+        from datetime import datetime, timezone
+        import json
+        import hermes_cli.web_server as ws
+
+        live_surfaces = tmp_path / "ai-start-live-surfaces.json"
+        live_surfaces.write_text(
+            json.dumps(
+                {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "active_panes": [
+                        {
+                            "pane": "ai-dev:fleet.2",
+                            "role": "Claude Code",
+                            "command": "claude",
+                        }
+                    ],
+                    "agent_work_map": [
+                        {
+                            "Peer": "Claude Code",
+                            "Status": "online",
+                            "Visibility": "A2A",
+                            "Pane": "ai-dev:fleet.2",
+                        }
+                    ],
+                    "bifrost_registry": {
+                        "Status": "healthy",
+                        "Required": "6/6",
+                        "Total": "6/6",
+                    },
+                    "handoffs": {
+                        "latest_pointer": {
+                            "Status": "stale",
+                            "Latest": "session-codex-mission-control-olympus-replacement-20260606.md",
+                        },
+                        "pending_actions": [
+                            {
+                                "action": "Treat Sinew as system-state orchestration.",
+                                "constraint": "executable",
+                                "source": "handoff.md",
+                            }
+                        ],
+                    },
+                    "web_surfaces": [
+                        {
+                            "surface": "Sinew bus API",
+                            "status": "up",
+                            "url": "http://127.0.0.1:8081/api/sinew",
+                        }
+                    ],
+                }
+            )
+        )
+
+        def fake_run(command, timeout=1.0):
+            if command == ["orb", "status"]:
+                return {
+                    "ok": True,
+                    "returncode": 0,
+                    "detail": "Stopped",
+                    "state": "down",
+                }
+            if command[:2] == ["tailscale", "status"]:
+                return {
+                    "ok": False,
+                    "returncode": 1,
+                    "detail": "Tailscale is stopped.",
+                    "state": "down",
+                }
+            return {
+                "ok": False,
+                "returncode": 1,
+                "detail": "not available in test",
+                "state": "unknown",
+            }
+
+        def fake_probe_json(url, timeout=1.0):
+            if url.endswith(":8081/api/sinew"):
+                return {
+                    "ok": True,
+                    "state": "degraded",
+                    "status_code": 200,
+                    "body": {
+                        "ok": False,
+                        "status": "error",
+                        "error": "URLError",
+                        "message_count": 0,
+                    },
+                    "detail": "URLError",
+                }
+            if url.endswith(":6167/_matrix/client/versions"):
+                return {
+                    "ok": False,
+                    "state": "down",
+                    "status_code": None,
+                    "body": None,
+                    "detail": "connection refused",
+                }
+            return {
+                "ok": False,
+                "state": "unknown",
+                "status_code": None,
+                "body": None,
+                "detail": "not checked",
+            }
+
+        def fake_probe_http(url, timeout=1.0):
+            if url.endswith(":8065/api/v4/system/ping"):
+                return {
+                    "ok": False,
+                    "state": "down",
+                    "status_code": None,
+                    "detail": "connection refused",
+                }
+            return {
+                "ok": True,
+                "state": "live",
+                "status_code": 200,
+                "detail": "HTTP 200",
+            }
+
+        monkeypatch.setattr(
+            ws,
+            "_MISSION_CONTROL_LIVE_SURFACES_PATH",
+            live_surfaces,
+            raising=False,
+        )
+        monkeypatch.setattr(ws, "_mission_control_run_command", fake_run, raising=False)
+        monkeypatch.setattr(ws, "_mission_control_probe_json", fake_probe_json, raising=False)
+        monkeypatch.setattr(ws, "_mission_control_probe_http", fake_probe_http, raising=False)
+        monkeypatch.setattr(
+            ws,
+            "_mission_control_docker_socket_exists",
+            lambda: False,
+            raising=False,
+        )
+
+        resp = self.client.get("/api/mission-control/forest")
+        assert resp.status_code == 200
+
+        data = resp.json()
+        assert data["summary"]["state"] == "degraded"
+        assert data["summary"]["primary_issue"] == "OrbStack is stopped"
+
+        nodes = {node["id"]: node for node in data["infrastructure"]["nodes"]}
+        assert nodes["orbstack"]["state"] == "down"
+        assert nodes["docker_socket"]["state"] == "down"
+        assert nodes["conduit"]["state"] == "down"
+        assert nodes["sinew"]["state"] == "degraded"
+        assert nodes["sinew"]["metrics"]["message_count"] == 0
+
+        channels = {channel["id"]: channel for channel in data["channels"]}
+        assert channels["matrix"]["canonicality"] == "status-fabric"
+        assert channels["telegram"]["canonicality"] == "operator-ingress"
+        assert channels["mattermost"]["state"] == "down"
+
+        remote = {entry["id"]: entry for entry in data["remote_access"]}
+        assert remote["tailscale"]["state"] == "down"
+
+        assert data["context"]["live_surface_feed"]["state"] in {"fresh", "stale"}
+        assert data["agent_lanes"]["tmux_panes"][0]["role"] == "Claude Code"
+        assert data["ownership"][0]["owner"] == "OrbStack"
+
     def test_get_sessions_uses_only_persisted_cwd(self, monkeypatch):
         """Session rows without persisted cwd must not inherit TERMINAL_CWD.
 
