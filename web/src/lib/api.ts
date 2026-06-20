@@ -1602,6 +1602,28 @@ export interface MissionControlNativeMemory {
   providers: MissionControlNativeMemoryProvider[];
 }
 
+export interface MissionControlMemoryProfile {
+  profile: string;
+  provider: string;
+  role?: string;
+  status: string;
+  proof?: string;
+  proof_id?: string;
+  detail?: string;
+  transition_only?: boolean;
+  not_honcho_dev_proof?: boolean;
+  ts?: string;
+  log_path?: string;
+  mtime?: string | null;
+}
+
+export interface MissionControlMemoryProfileConsole {
+  ok: boolean;
+  source: string;
+  profiles: MissionControlMemoryProfile[];
+  error?: string;
+}
+
 export interface MissionControlWhatsappInputs {
   captured_at: string | null;
   source: string;
@@ -1621,6 +1643,7 @@ export interface MissionControlByomResponse {
   honcho: MissionControlHealth;
   cortex_honcho_clone: MissionControlHealth;
   native_memory: MissionControlNativeMemory;
+  memory_profile_console: MissionControlMemoryProfileConsole;
   whatsapp_inputs: MissionControlWhatsappInputs;
   caveats: string[];
 }

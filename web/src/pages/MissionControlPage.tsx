@@ -26,6 +26,7 @@ import type {
   MissionControlContextForgeRegistry,
   MissionControlContextForgeRegistrySample,
   MissionControlHealth,
+  MissionControlMemoryProfileConsole,
   MissionControlOpenSkillsCatalog,
   MissionControlPlane,
   MissionControlSkill,
@@ -212,6 +213,68 @@ function HealthPanel({
         {health.error && (
           <div className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {health.error}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function MemoryProfileConsolePanel({ console }: { console: MissionControlMemoryProfileConsole }) {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <Brain className="h-5 w-5 shrink-0 text-muted-foreground" />
+            <CardTitle className="truncate text-base">Memory profile console</CardTitle>
+          </div>
+          <HealthPill ok={console.ok} />
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="truncate font-mono text-xs text-muted-foreground">
+          {console.source}
+        </div>
+        {console.profiles.length ? (
+          <div className="grid gap-3 md:grid-cols-2">
+            {console.profiles.map((profile) => (
+              <div key={profile.profile} className="rounded border border-border/70 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{profile.profile}</div>
+                    <div className="mt-1 truncate text-xs text-muted-foreground">
+                      {profile.role ?? profile.provider}
+                    </div>
+                  </div>
+                  <Badge tone={profile.status === "ok" ? "success" : "destructive"}>
+                    {profile.status}
+                  </Badge>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Badge tone="secondary">{profile.proof ?? "proof pending"}</Badge>
+                  {profile.transition_only && <Badge tone="warning">transition only</Badge>}
+                  {profile.not_honcho_dev_proof && <Badge tone="warning">not Honcho.dev proof</Badge>}
+                </div>
+                {profile.detail && (
+                  <div className="mt-3 text-xs text-muted-foreground">
+                    {profile.detail}
+                  </div>
+                )}
+                {profile.proof_id && (
+                  <div className="mt-2 truncate font-mono text-xs text-muted-foreground">
+                    {profile.proof_id}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-sm text-muted-foreground">No memory profile logs reported.</div>
+        )}
+        {console.error && (
+          <div className="rounded border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+            {console.error}
           </div>
         )}
       </CardContent>
@@ -535,6 +598,7 @@ export default function MissionControlPage() {
         <HealthPanel title="IBM/local ContextForge" icon={Database} health={data.contextforge} />
         <ContextForgeRegistryPanel registry={data.contextforge_registry} />
         <HealthPanel title="Honcho.dev memory provider" icon={Brain} health={data.honcho} />
+        <MemoryProfileConsolePanel console={data.memory_profile_console} />
         <HealthPanel title="Local turn sync" icon={Brain} health={data.local_turn_sync} />
         <HealthPanel title="Cortex/Honcho clone transition service" icon={Database} health={data.cortex_honcho_clone} />
       </div>

@@ -41,11 +41,13 @@ def test_mission_control_byom_payload_includes_fleet_sources(tmp_path, monkeypat
     okf_openskills_catalog = vault / "okf/fleet/tools/openskills-catalog.md"
     smoke_dir = tmp_path / "smoke"
     skill_root = tmp_path / "skills/openskills"
+    profile_log_dir = tmp_path / "memory-profile-logs"
 
     okf_pattern.parent.mkdir(parents=True, exist_ok=True)
     okf_index.parent.mkdir(parents=True, exist_ok=True)
     okf_openskills.parent.mkdir(parents=True, exist_ok=True)
     smoke_dir.mkdir(parents=True)
+    profile_log_dir.mkdir(parents=True)
 
     okf_pattern.write_text(
         """---
@@ -104,6 +106,22 @@ Catalog size from live readback: 31 skills across 7 categories.
     (smoke_dir / "image-generation-gateway.txt").write_text("ok: generated image\n", encoding="utf-8")
     (skill_root / "image-generation-gateway").mkdir(parents=True)
     (skill_root / "image-generation-gateway/SKILL.md").write_text("# Image generation\n", encoding="utf-8")
+    (profile_log_dir / "memory-honcho-dev.log").write_text(
+        """starting honcho
+{"profile":"memory-honcho-dev","provider":"honcho-dev","role":"real-honcho-dev-provider","status":"degraded","proof":"write","proof_id":"honcho-proof","detail":"Connection refused","transition_only":false,"not_honcho_dev_proof":false,"ts":"2026-06-20T04:15:53Z"}
+""",
+        encoding="utf-8",
+    )
+    (profile_log_dir / "memory-hindsight.log").write_text(
+        """{"profile":"memory-hindsight","provider":"hindsight","role":"retained-experience-memory","status":"ok","proof":"write-readback","proof_id":"hindsight-proof","detail":"Hindsight write/readback succeeded","transition_only":false,"not_honcho_dev_proof":false,"ts":"2026-06-20T04:15:54Z"}
+""",
+        encoding="utf-8",
+    )
+    (profile_log_dir / "memory-cortex-mirror.log").write_text(
+        """{"profile":"memory-cortex-mirror","provider":"cortex-mirror","role":"transition-non-hermes-mirror","status":"ok","proof":"health-readback","proof_id":"cortex-proof","detail":"Cortex health is not Honcho.dev proof.","transition_only":true,"not_honcho_dev_proof":true,"ts":"2026-06-20T04:16:17Z"}
+""",
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(web_server, "_MISSION_CONTROL_VAULT", vault, raising=False)
     monkeypatch.setattr(web_server, "_OKF_INDEX", okf_index, raising=False)
@@ -112,6 +130,7 @@ Catalog size from live readback: 31 skills across 7 categories.
     monkeypatch.setattr(web_server, "_OKF_OPENSKILLS_CATALOG", okf_openskills_catalog, raising=False)
     monkeypatch.setattr(web_server, "_OPENSKILLS_SMOKE_DIR", smoke_dir, raising=False)
     monkeypatch.setattr(web_server, "_OPENSKILLS_SKILL_ROOT", skill_root, raising=False)
+    monkeypatch.setattr(web_server, "_MEMORY_PROFILE_LOG_DIR", profile_log_dir, raising=False)
     monkeypatch.setattr(
         web_server,
         "_mission_control_contextforge_health",
@@ -271,6 +290,17 @@ Catalog size from live readback: 31 skills across 7 categories.
     assert payload["skills"][0]["smoke_exists"] is True
     assert payload["skills"][0]["ok"] is True
     assert payload["memory_planes"] == payload["local_turn_sync"]["planes"]
+    assert payload["memory_profile_console"]["ok"] is False
+    assert [item["profile"] for item in payload["memory_profile_console"]["profiles"]] == [
+        "memory-honcho-dev",
+        "memory-hindsight",
+        "memory-cortex-mirror",
+    ]
+    profile_by_id = {item["profile"]: item for item in payload["memory_profile_console"]["profiles"]}
+    assert profile_by_id["memory-hindsight"]["status"] == "ok"
+    assert profile_by_id["memory-honcho-dev"]["status"] == "degraded"
+    assert profile_by_id["memory-cortex-mirror"]["transition_only"] is True
+    assert profile_by_id["memory-cortex-mirror"]["not_honcho_dev_proof"] is True
 
 
 def test_mission_control_byom_degrades_when_sources_or_planes_are_missing(tmp_path, monkeypatch, _isolate_hermes_home):
@@ -284,6 +314,7 @@ def test_mission_control_byom_degrades_when_sources_or_planes_are_missing(tmp_pa
     monkeypatch.setattr(web_server, "_OKF_OPENSKILLS_CATALOG", vault / "okf/fleet/tools/openskills-catalog.md", raising=False)
     monkeypatch.setattr(web_server, "_OPENSKILLS_SMOKE_DIR", tmp_path / "no-smoke", raising=False)
     monkeypatch.setattr(web_server, "_OPENSKILLS_SKILL_ROOT", tmp_path / "no-skills", raising=False)
+    monkeypatch.setattr(web_server, "_MEMORY_PROFILE_LOG_DIR", tmp_path / "no-profile-logs", raising=False)
     monkeypatch.setattr(
         web_server,
         "_mission_control_contextforge_health",
@@ -369,6 +400,8 @@ def test_mission_control_byom_degrades_when_sources_or_planes_are_missing(tmp_pa
     assert any(provider["id"] == "honcho" and provider["ok"] is False for provider in payload["native_memory"]["providers"])
     assert payload["local_turn_sync"]["ok"] is False
     assert payload["memory_planes"] == []
+    assert payload["memory_profile_console"]["ok"] is False
+    assert payload["memory_profile_console"]["profiles"] == []
     assert all(host["reachability"]["status"] == "unverified" for host in payload["hosts"])
     assert all(host["reachability"]["source"] == "tailscale status --json" for host in payload["hosts"])
     assert payload["openskills_catalog"]["exists"] is False

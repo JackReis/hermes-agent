@@ -1738,6 +1738,7 @@ _HONCHO_DOCS_URL = "http://127.0.0.1:8002/docs"
 _TAILSCALE_STATUS_SOURCE = "tailscale status --json"
 _OPENSKILLS_SKILL_ROOT = get_hermes_home() / "skills/openskills"
 _OPENSKILLS_SMOKE_DIR = get_hermes_home() / "tmp/openskills-smoke"
+_MEMORY_PROFILE_LOG_DIR = Path.home() / ".hermes/logs/memory-profiles"
 _OPENSKILLS_PRIMITIVES = (
     ("image-generation-gateway", "Image generation gateway"),
     ("current-information-search", "Current information search"),
@@ -2377,6 +2378,63 @@ def _mission_control_local_turn_sync_health() -> dict[str, Any]:
     return result
 
 
+def _mission_control_memory_profile_console() -> dict[str, Any]:
+    """Read latest JSONL verifier rows from adjacent memory-profile panes."""
+    if not _MEMORY_PROFILE_LOG_DIR.exists():
+        return {
+            "ok": False,
+            "source": str(_MEMORY_PROFILE_LOG_DIR),
+            "profiles": [],
+            "error": "memory profile log directory missing",
+        }
+
+    profiles: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for path in sorted(_MEMORY_PROFILE_LOG_DIR.glob("memory-*.log")):
+        latest: dict[str, Any] | None = None
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            errors.append(f"{path.name}: {_mission_control_truncate(str(exc), 120)}")
+            continue
+        for line in reversed(lines[-80:]):
+            stripped = line.strip()
+            if not stripped.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and parsed.get("profile"):
+                latest = parsed
+                break
+        if latest is None:
+            errors.append(f"{path.name}: no JSON verifier row")
+            continue
+        latest = dict(latest)
+        latest["log_path"] = str(path)
+        latest["mtime"] = _mission_control_iso_mtime(path)
+        profiles.append(latest)
+
+    active_profiles = [profile for profile in profiles if not profile.get("transition_only")]
+    order = {
+        "memory-honcho-dev": 0,
+        "memory-hindsight": 1,
+        "memory-holographic": 2,
+        "memory-cortex-mirror": 3,
+    }
+    profiles.sort(key=lambda item: (order.get(str(item.get("profile")), 99), str(item.get("profile") or "")))
+    ok = bool(active_profiles) and all(str(profile.get("status")) == "ok" for profile in active_profiles)
+    result: dict[str, Any] = {
+        "ok": ok,
+        "source": str(_MEMORY_PROFILE_LOG_DIR),
+        "profiles": profiles,
+    }
+    if errors:
+        result["error"] = "; ".join(errors[:5])
+    return result
+
+
 def _mission_control_native_memory(
     honcho_health: dict[str, Any],
     local_turn_sync: dict[str, Any],
@@ -2433,6 +2491,7 @@ def _mission_control_caveats(
     contextforge_registry: dict[str, Any],
     honcho: dict[str, Any],
     native_memory: dict[str, Any],
+    memory_profile_console: dict[str, Any],
 ) -> list[str]:
     caveats: list[str] = []
     missing_sources = [source["id"] for source in sources if not source.get("exists")]
@@ -2454,6 +2513,13 @@ def _mission_control_caveats(
         caveats.append("ContextForge registry readback is degraded")
     if not honcho.get("ok"):
         caveats.append("Native Hermes Honcho provider is degraded")
+    for profile in memory_profile_console.get("profiles", []):
+        if (
+            isinstance(profile, dict)
+            and not profile.get("transition_only")
+            and str(profile.get("status")) != "ok"
+        ):
+            caveats.append(f"Memory profile is degraded: {profile.get('profile')}")
     for provider in native_memory.get("providers", []):
         if isinstance(provider, dict) and provider.get("configured") and not provider.get("ok"):
             caveats.append(f"Configured native memory provider is degraded: {provider.get('id')}")
@@ -2469,17 +2535,19 @@ async def mission_control_byom():
     turn_sync_future = loop.run_in_executor(None, _mission_control_local_turn_sync_health)
     honcho_future = loop.run_in_executor(None, _mission_control_honcho_health)
     cortex_honcho_future = loop.run_in_executor(None, _mission_control_cortex_honcho_clone_health)
+    memory_profile_console_future = loop.run_in_executor(None, _mission_control_memory_profile_console)
     sources = _mission_control_okf_sources()
     hosts = _mission_control_hosts()
     skills = _mission_control_openskills()
     openskills_catalog = _mission_control_openskills_catalog()
     whatsapp_inputs = _mission_control_whatsapp_inputs()
-    contextforge, contextforge_registry, local_turn_sync, honcho, cortex_honcho_clone = await asyncio.gather(
+    contextforge, contextforge_registry, local_turn_sync, honcho, cortex_honcho_clone, memory_profile_console = await asyncio.gather(
         contextforge_future,
         contextforge_registry_future,
         turn_sync_future,
         honcho_future,
         cortex_honcho_future,
+        memory_profile_console_future,
     )
     native_memory = _mission_control_native_memory(honcho, local_turn_sync)
     planes = local_turn_sync.get("planes") if isinstance(local_turn_sync.get("planes"), list) else []
@@ -2496,6 +2564,7 @@ async def mission_control_byom():
         "honcho": honcho,
         "cortex_honcho_clone": cortex_honcho_clone,
         "native_memory": native_memory,
+        "memory_profile_console": memory_profile_console,
         "whatsapp_inputs": whatsapp_inputs,
         "caveats": _mission_control_caveats(
             sources,
@@ -2507,6 +2576,7 @@ async def mission_control_byom():
             contextforge_registry,
             honcho,
             native_memory,
+            memory_profile_console,
         ),
     }
 
