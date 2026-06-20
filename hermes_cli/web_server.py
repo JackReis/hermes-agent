@@ -1722,6 +1722,795 @@ async def fs_default_cwd():
     return {"cwd": cwd, "branch": _fs_git_branch(cwd)}
 
 
+_MISSION_CONTROL_VAULT = Path("/Users/jack.reis/Documents/=notes")
+_OKF_INDEX = _MISSION_CONTROL_VAULT / "okf/fleet/index.md"
+_OKF_BYOM = _MISSION_CONTROL_VAULT / "okf/fleet/patterns/byom-agent-fleet-mission-control.md"
+_OKF_OPENSKILLS = _MISSION_CONTROL_VAULT / "okf/fleet/tools/openskills-core-infrastructure.md"
+_OKF_OPENSKILLS_CATALOG = _MISSION_CONTROL_VAULT / "okf/fleet/tools/openskills-catalog.md"
+_LOCAL_TURN_SYNC = _MISSION_CONTROL_VAULT / "bin/local-turn-sync"
+_CONTEXTFORGE_BASE_URL = "http://127.0.0.1:8090"
+_CONTEXTFORGE_HEALTH_URL = f"{_CONTEXTFORGE_BASE_URL}/health"
+_CONTEXTFORGE_TOKEN_HELPER = Path.home() / ".hermes/bin/contextforge-token.sh"
+_CONTEXTFORGE_ROLE = "IBM ContextForge gateway/registry/proxy for MCP, A2A, and REST/gRPC APIs"
+_HONCHO_HEALTH_URL = "http://127.0.0.1:8002/api/v1/health"
+_HONCHO_DB_HEALTH_URL = "http://127.0.0.1:8002/api/v1/health/db"
+_HONCHO_DOCS_URL = "http://127.0.0.1:8002/docs"
+_TAILSCALE_STATUS_SOURCE = "tailscale status --json"
+_OPENSKILLS_SKILL_ROOT = get_hermes_home() / "skills/openskills"
+_OPENSKILLS_SMOKE_DIR = get_hermes_home() / "tmp/openskills-smoke"
+_OPENSKILLS_PRIMITIVES = (
+    ("image-generation-gateway", "Image generation gateway"),
+    ("current-information-search", "Current information search"),
+    ("media-transcription", "Media transcription"),
+    ("heavy-file-ingestion", "Heavy file ingestion"),
+    ("html-artifact-builder", "HTML artifact builder"),
+)
+
+
+def _mission_control_truncate(value: str, limit: int = 1200) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
+
+
+def _mission_control_iso_mtime(path: Path) -> str | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        return None
+
+
+def _extract_yaml_frontmatter(text: str) -> dict[str, Any]:
+    if not text.startswith("---\n"):
+        return {}
+    end = text.find("\n---", 4)
+    if end == -1:
+        return {}
+    raw = text[4:end].strip()
+    if not raw:
+        return {}
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _extract_first_heading(text: str) -> str | None:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip() or None
+    return None
+
+
+def _extract_heading_bullets(text: str, heading: str) -> list[str]:
+    target = heading.strip().lower()
+    in_section = False
+    bullets: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            if in_section:
+                break
+            in_section = stripped[3:].strip().lower() == target
+            continue
+        if not in_section:
+            continue
+        if stripped.startswith("- "):
+            bullets.append(stripped[2:].strip())
+    return bullets
+
+
+def _extract_markdown_table_skill_count(lines: list[str]) -> int:
+    count = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not cells:
+            continue
+        first = cells[0].lower()
+        if first == "skill" or set(first) <= {"-", ":"}:
+            continue
+        count += 1
+    return count
+
+
+def _read_text_source(path: Path, *, max_chars: int = 20000) -> dict[str, Any]:
+    exists = path.exists()
+    item: dict[str, Any] = {
+        "path": str(path),
+        "exists": exists,
+        "title": None,
+        "timestamp": None,
+        "mtime": _mission_control_iso_mtime(path),
+        "byte_size": None,
+    }
+    if not exists:
+        return item
+    try:
+        stat_result = path.stat()
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        item["error"] = str(exc) or "read failed"
+        return item
+    frontmatter = _extract_yaml_frontmatter(text)
+    title = frontmatter.get("title") if isinstance(frontmatter.get("title"), str) else None
+    timestamp = frontmatter.get("updated") or frontmatter.get("created") or frontmatter.get("timestamp")
+    source_url = frontmatter.get("source_url") if isinstance(frontmatter.get("source_url"), str) else None
+    item.update({
+        "byte_size": stat_result.st_size,
+        "title": title or _extract_first_heading(text) or path.name,
+        "timestamp": str(timestamp) if timestamp is not None else None,
+        "source_url": source_url,
+        "text": _mission_control_truncate(text, max_chars),
+    })
+    return item
+
+
+def _mission_control_okf_sources() -> list[dict[str, Any]]:
+    specs = (
+        ("okf-index", "okf", _OKF_INDEX),
+        ("okf-byom", "okf-pattern", _OKF_BYOM),
+        ("okf-openskills", "okf-tool", _OKF_OPENSKILLS),
+    )
+    sources: list[dict[str, Any]] = []
+    for source_id, kind, path in specs:
+        source = _read_text_source(path)
+        source.update({"id": source_id, "kind": kind})
+        source.pop("text", None)
+        sources.append(source)
+    return sources
+
+
+def _mission_control_openskills_catalog() -> dict[str, Any]:
+    source = _read_text_source(_OKF_OPENSKILLS_CATALOG)
+    base: dict[str, Any] = {
+        "path": source["path"],
+        "exists": bool(source["exists"]),
+        "title": source.get("title"),
+        "source_url": source.get("source_url"),
+        "skill_count": 0,
+        "category_count": 0,
+        "categories": [],
+    }
+    if not source.get("exists"):
+        return base
+
+    text = str(source.get("text") or "")
+    declared = re.search(r"Catalog size from live readback:\s*(\d+)\s+skills across\s+(\d+)\s+categories", text)
+    categories: list[dict[str, Any]] = []
+    current_name: str | None = None
+    current_lines: list[str] = []
+    stop_headings = {"runbook compositions", "mission control use"}
+
+    def flush_category() -> None:
+        if current_name is None:
+            return
+        count = _extract_markdown_table_skill_count(current_lines)
+        if count:
+            categories.append({"name": current_name, "skill_count": count})
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            flush_category()
+            name = stripped[3:].strip()
+            current_name = None if name.lower() in stop_headings else name
+            current_lines = []
+            continue
+        if current_name is not None:
+            current_lines.append(line)
+    flush_category()
+
+    base.update({
+        "skill_count": int(declared.group(1)) if declared else sum(int(category["skill_count"]) for category in categories),
+        "category_count": int(declared.group(2)) if declared else len(categories),
+        "categories": categories,
+    })
+    return base
+
+
+def _mission_control_whatsapp_inputs() -> dict[str, Any]:
+    source = _read_text_source(_OKF_BYOM)
+    text = str(source.get("text") or "")
+    bullets = _extract_heading_bullets(text, "Latest AI Exec Circle Inputs")
+    return {
+        "captured_at": source.get("mtime"),
+        "source": str(_OKF_BYOM),
+        "bullets": bullets,
+    }
+
+
+def _mission_control_tailscale_status() -> dict[str, Any]:
+    command = shutil.which("tailscale")
+    if not command:
+        return {"ok": False, "source": _TAILSCALE_STATUS_SOURCE, "reason": "command-not-found"}
+    try:
+        proc = subprocess.run(
+            [command, "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "source": _TAILSCALE_STATUS_SOURCE, "reason": "timeout"}
+    except OSError:
+        return {"ok": False, "source": _TAILSCALE_STATUS_SOURCE, "reason": "command-failed"}
+    if proc.returncode != 0:
+        return {"ok": False, "source": _TAILSCALE_STATUS_SOURCE, "reason": "command-failed"}
+    try:
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except json.JSONDecodeError:
+        return {"ok": False, "source": _TAILSCALE_STATUS_SOURCE, "reason": "invalid-json"}
+    peers = data.get("Peer")
+    return {
+        "ok": True,
+        "source": _TAILSCALE_STATUS_SOURCE,
+        "self": data.get("Self") if isinstance(data.get("Self"), dict) else None,
+        "peers": list(peers.values()) if isinstance(peers, dict) else [],
+    }
+
+
+def _mission_control_normalize_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _mission_control_tailscale_node_names(node: dict[str, Any]) -> set[str]:
+    dns_name = str(node.get("DNSName") or "")
+    return {
+        name
+        for name in (
+            _mission_control_normalize_name(node.get("HostName")),
+            _mission_control_normalize_name(dns_name.rstrip(".").split(".")[0]),
+            _mission_control_normalize_name(node.get("Name")),
+        )
+        if name
+    }
+
+
+def _mission_control_tailscale_address(node: dict[str, Any]) -> str | None:
+    addresses = node.get("TailscaleIPs")
+    if isinstance(addresses, list) and addresses:
+        return str(addresses[0])
+    return None
+
+
+def _mission_control_tailscale_last_seen(node: dict[str, Any]) -> str | None:
+    value = node.get("LastSeen")
+    if value is None:
+        return None
+    text = str(value)
+    if text.startswith("0001-01-01"):
+        return None
+    return text
+
+
+def _mission_control_unverified_reachability(source: str, reason: str = "not-found") -> dict[str, Any]:
+    return {
+        "source": source,
+        "status": "unverified",
+        "last_seen": None,
+        "address": None,
+        "matched_name": None,
+        "evidence": None,
+        "reason": reason,
+    }
+
+
+def _mission_control_reachability_from_node(node: dict[str, Any], source: str, evidence: str) -> dict[str, Any]:
+    online = node.get("Online") is True
+    matched_name = node.get("HostName") or node.get("Name") or node.get("DNSName")
+    return {
+        "source": source,
+        "status": "online" if online else "unverified",
+        "last_seen": _mission_control_tailscale_last_seen(node),
+        "address": _mission_control_tailscale_address(node),
+        "matched_name": str(matched_name) if matched_name else None,
+        "evidence": evidence,
+        "reason": None if online else "tailscale-not-online",
+    }
+
+
+def _mission_control_host_reachability(aliases: list[str], tailscale_status: dict[str, Any]) -> dict[str, Any]:
+    source = str(tailscale_status.get("source") or _TAILSCALE_STATUS_SOURCE)
+    if not tailscale_status.get("ok"):
+        return _mission_control_unverified_reachability(source, str(tailscale_status.get("reason") or "command-failed"))
+    wanted = {_mission_control_normalize_name(alias) for alias in aliases}
+    self_node = tailscale_status.get("self")
+    if isinstance(self_node, dict) and wanted.intersection(_mission_control_tailscale_node_names(self_node)):
+        return _mission_control_reachability_from_node(self_node, source, "self")
+    peers = tailscale_status.get("peers")
+    if isinstance(peers, list):
+        for peer in peers:
+            if isinstance(peer, dict) and wanted.intersection(_mission_control_tailscale_node_names(peer)):
+                return _mission_control_reachability_from_node(peer, source, "peer")
+    return _mission_control_unverified_reachability(source)
+
+
+def _mission_control_hosts() -> list[dict[str, Any]]:
+    tailscale_status = _mission_control_tailscale_status()
+    specs = [
+        {"id": "olivier", "label": "Olivier", "role": "MacBook Pro mission control", "aliases": ["olivier", "talaria"]},
+        {"id": "aegis", "label": "Aegis", "role": "Mac mini worker host", "aliases": ["aegis"]},
+        {"id": "pi", "label": "Pi / OpenClaw", "role": "OpenClaw and edge lane", "aliases": ["pi", "openclaw"]},
+        {"id": "bill", "label": "KIMI_DROID / Bill", "role": "Android BYOM lane", "aliases": ["bill", "kimi-droid", "kimi_droid"]},
+    ]
+    hosts: list[dict[str, Any]] = []
+    for spec in specs:
+        reachability = _mission_control_host_reachability(spec["aliases"], tailscale_status)
+        hosts.append({
+            "id": spec["id"],
+            "label": spec["label"],
+            "role": spec["role"],
+            "live_probe": reachability["status"] == "online",
+            "reachability": reachability,
+        })
+    return hosts
+
+
+def _mission_control_host_caveat(hosts: list[dict[str, Any]]) -> str:
+    unverified = [str(host.get("id")) for host in hosts if host.get("reachability", {}).get("status") == "unverified"]
+    if unverified:
+        return (
+            "Host reachability uses read-only local Tailscale status only; "
+            f"unverified hosts have no live proof: {', '.join(unverified)}."
+        )
+    return "Host reachability uses read-only local Tailscale status only; no SSH, ADB, or remote commands are run."
+
+
+def _mission_control_openskills() -> list[dict[str, Any]]:
+    skills: list[dict[str, Any]] = []
+    for skill_id, label in _OPENSKILLS_PRIMITIVES:
+        skill_path = _OPENSKILLS_SKILL_ROOT / skill_id / "SKILL.md"
+        smoke_path = _OPENSKILLS_SMOKE_DIR / f"{skill_id}.txt"
+        smoke_line = None
+        if smoke_path.exists():
+            try:
+                smoke_line = smoke_path.read_text(encoding="utf-8", errors="replace").splitlines()[0:1]
+                smoke_line = smoke_line[0] if smoke_line else ""
+            except OSError:
+                smoke_line = None
+        installed = skill_path.exists()
+        smoke_exists = smoke_path.exists()
+        skills.append({
+            "id": skill_id,
+            "label": label,
+            "skill_path": str(skill_path),
+            "installed": installed,
+            "smoke_path": str(smoke_path),
+            "smoke_exists": smoke_exists,
+            "smoke_line": smoke_line,
+            "ok": installed and smoke_exists,
+        })
+    return skills
+
+
+def _mission_control_contextforge_health() -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(_CONTEXTFORGE_HEALTH_URL, timeout=3) as response:
+            raw = response.read(4096).decode("utf-8", errors="replace")
+            try:
+                details = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                details = {"body": _mission_control_truncate(raw, 300)}
+            status = str(details.get("status") or details.get("state") or response.status)
+            return {
+                "ok": 200 <= response.status < 300,
+                "status": status,
+                "url": _CONTEXTFORGE_HEALTH_URL,
+                "details": details,
+            }
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {
+            "ok": False,
+            "status": "unreachable",
+            "url": _CONTEXTFORGE_HEALTH_URL,
+            "error": _mission_control_truncate(str(exc), 300),
+        }
+
+
+def _mission_control_contextforge_registry_base(error: str | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ok": False,
+        "source": _CONTEXTFORGE_BASE_URL,
+        "gateway": {
+            "title": "ContextForge",
+            "version": None,
+            "role": _CONTEXTFORGE_ROLE,
+        },
+        "counts": {"tools": 0, "resources": 0, "gateways": 0, "servers": 0},
+        "samples": {"gateways": [], "servers": [], "resources": []},
+    }
+    if error:
+        result["error"] = _mission_control_truncate(error, 300)
+    return result
+
+
+def _mission_control_contextforge_token() -> tuple[str | None, str | None]:
+    if not _CONTEXTFORGE_TOKEN_HELPER.exists():
+        return None, f"missing token helper: {_CONTEXTFORGE_TOKEN_HELPER}"
+    try:
+        proc = subprocess.run(
+            [str(_CONTEXTFORGE_TOKEN_HELPER), "show"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, str(exc)
+    token = proc.stdout.strip()
+    if proc.returncode != 0 or not token:
+        return None, "token helper did not return a token"
+    return token, None
+
+
+def _mission_control_contextforge_get(path: str, token: str, *, timeout: int = 4, max_bytes: int = 2 * 1024 * 1024) -> Any:
+    request = urllib.request.Request(
+        f"{_CONTEXTFORGE_BASE_URL}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise ValueError(f"{path} response exceeded {max_bytes} bytes")
+    raw = body.decode("utf-8", errors="replace")
+    return json.loads(raw) if raw else None
+
+
+def _mission_control_contextforge_items(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in ("items", "data", "results"):
+            nested = value.get(key)
+            if isinstance(nested, list):
+                return nested
+    return []
+
+
+def _mission_control_contextforge_sample(item: Any, fields: tuple[str, ...]) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    sample: dict[str, Any] = {}
+    for field in fields:
+        if field in item:
+            sample[field] = item.get(field)
+    name = sample.get("name") or item.get("id") or item.get("title")
+    if name is not None:
+        sample["name"] = str(name)
+    return sample if sample.get("name") else None
+
+
+def _mission_control_contextforge_samples(items: list[Any], fields: tuple[str, ...]) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    for item in items:
+        sample = _mission_control_contextforge_sample(item, fields)
+        if sample:
+            samples.append(sample)
+        if len(samples) >= 5:
+            break
+    return samples
+
+
+def _mission_control_contextforge_registry() -> dict[str, Any]:
+    token, token_error = _mission_control_contextforge_token()
+    if not token:
+        return _mission_control_contextforge_registry_base(token_error or "ContextForge token unavailable")
+
+    result = _mission_control_contextforge_registry_base()
+    errors: list[str] = []
+    try:
+        openapi = _mission_control_contextforge_get("/openapi.json", token)
+        info = openapi.get("info", {}) if isinstance(openapi, dict) else {}
+        title = info.get("title") if isinstance(info.get("title"), str) else "ContextForge"
+        version = info.get("version") if isinstance(info.get("version"), str) else None
+        description = info.get("description") if isinstance(info.get("description"), str) else None
+        result["gateway"] = {
+            "title": title,
+            "version": version,
+            "role": _CONTEXTFORGE_ROLE,
+        }
+        if description:
+            result["gateway"]["description"] = _mission_control_truncate(description, 240)
+    except (ValueError, json.JSONDecodeError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        errors.append(f"openapi: {exc}")
+
+    collections: dict[str, list[Any]] = {}
+    for key, path in (("tools", "/tools"), ("resources", "/resources"), ("gateways", "/gateways"), ("servers", "/servers")):
+        try:
+            collections[key] = _mission_control_contextforge_items(_mission_control_contextforge_get(path, token))
+        except (ValueError, json.JSONDecodeError, urllib.error.URLError, TimeoutError, OSError) as exc:
+            collections[key] = []
+            errors.append(f"{key}: {exc}")
+
+    result["counts"] = {key: len(collections.get(key, [])) for key in ("tools", "resources", "gateways", "servers")}
+    result["samples"] = {
+        "gateways": _mission_control_contextforge_samples(collections.get("gateways", []), ("name", "enabled", "reachable")),
+        "servers": _mission_control_contextforge_samples(collections.get("servers", []), ("name", "enabled")),
+        "resources": _mission_control_contextforge_samples(collections.get("resources", []), ("name", "enabled")),
+    }
+    result["ok"] = not errors
+    if errors:
+        result["error"] = _mission_control_truncate("; ".join(errors), 300)
+    return result
+
+
+def _mission_control_fetch_json_health(url: str, *, timeout: int = 3) -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            raw = response.read(4096).decode("utf-8", errors="replace")
+            try:
+                details = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                details = {"body": _mission_control_truncate(raw, 300)}
+            status = str(details.get("status") or details.get("state") or response.status)
+            return {
+                "ok": 200 <= response.status < 300,
+                "status": status,
+                "url": url,
+                "details": details,
+            }
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {
+            "ok": False,
+            "status": "unreachable",
+            "url": url,
+            "error": _mission_control_truncate(str(exc), 300),
+        }
+
+
+def _mission_control_cortex_honcho_clone_health() -> dict[str, Any]:
+    service = _mission_control_fetch_json_health(_HONCHO_HEALTH_URL)
+    db = _mission_control_fetch_json_health(_HONCHO_DB_HEALTH_URL)
+    docs_ok = False
+    docs_error = None
+    try:
+        request = urllib.request.Request(_HONCHO_DOCS_URL, method="HEAD")
+        with urllib.request.urlopen(request, timeout=3) as response:
+            docs_ok = 200 <= response.status < 300
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        docs_error = _mission_control_truncate(str(exc), 300)
+    result = {
+        "ok": bool(service.get("ok")) and bool(db.get("ok")) and docs_ok,
+        "status": service.get("status", "unknown"),
+        "url": _HONCHO_HEALTH_URL,
+        "db_ok": bool(db.get("ok")),
+        "docs_ok": docs_ok,
+        "docs_url": _HONCHO_DOCS_URL,
+        "label": "Cortex/Honcho clone",
+        "kind": "local-cortex-honcho-clone",
+        "disambiguation": "Local Cortex/Honcho clone health is not proof of upstream Honcho.dev cloud/plugin writes.",
+        "details": {
+            "service": service.get("details", {}),
+            "database": db.get("details", {}),
+        },
+    }
+    errors = [str(value) for value in (service.get("error"), db.get("error"), docs_error) if value]
+    if errors:
+        result["error"] = "; ".join(errors)
+    return result
+
+
+def _mission_control_honcho_health() -> dict[str, Any]:
+    try:
+        from plugins.memory.honcho.client import HonchoClientConfig
+        cfg = HonchoClientConfig.from_global_config()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "config-error",
+            "label": "Honcho.dev memory provider",
+            "kind": "native-hermes-memory-provider",
+            "configured": False,
+            "enabled": False,
+            "has_api_key": False,
+            "has_base_url": False,
+            "connection_tested": False,
+            "error": _mission_control_truncate(str(exc), 300),
+            "disambiguation": "This is the real Hermes Honcho provider, not the local Cortex/Honcho clone.",
+        }
+    has_api_key = bool(getattr(cfg, "api_key", None))
+    has_base_url = bool(getattr(cfg, "base_url", None))
+    enabled = bool(getattr(cfg, "enabled", False))
+    configured = enabled and (has_api_key or has_base_url)
+    base_url = getattr(cfg, "base_url", None)
+    return {
+        "ok": configured,
+        "status": "configured" if configured else ("disabled" if not enabled else "missing-credentials"),
+        "label": "Honcho.dev memory provider",
+        "kind": "native-hermes-memory-provider",
+        "configured": configured,
+        "enabled": enabled,
+        "has_api_key": has_api_key,
+        "has_base_url": has_base_url,
+        "base_url_kind": "self-hosted" if base_url else "honcho-dev-cloud",
+        "host": getattr(cfg, "host", None),
+        "workspace": getattr(cfg, "workspace_id", None),
+        "ai_peer": getattr(cfg, "ai_peer", None),
+        "recall_mode": getattr(cfg, "recall_mode", None),
+        "write_frequency": getattr(cfg, "write_frequency", None),
+        "connection_tested": False,
+        "disambiguation": "This is the real Hermes Honcho provider, not the local Cortex/Honcho clone.",
+    }
+
+
+def _mission_control_local_turn_sync_health() -> dict[str, Any]:
+    if not _LOCAL_TURN_SYNC.exists():
+        return {"ok": False, "planes": [], "exit_code": 127, "error": f"missing executable: {_LOCAL_TURN_SYNC}"}
+    try:
+        proc = subprocess.run(
+            [str(_LOCAL_TURN_SYNC), "health"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "planes": [], "error": _mission_control_truncate(str(exc), 300)}
+
+    stdout = proc.stdout.strip()
+    stderr = proc.stderr.strip()
+    try:
+        data = json.loads(stdout) if stdout else {}
+    except json.JSONDecodeError:
+        data = {"raw": _mission_control_truncate(stdout, 600)}
+    planes = data.get("planes") if isinstance(data, dict) else []
+    if not isinstance(planes, list):
+        planes = []
+    ok = proc.returncode == 0 and (not planes or all(bool(plane.get("ok")) for plane in planes if isinstance(plane, dict)))
+    result = {
+        "ok": ok,
+        "planes": planes,
+        "exit_code": proc.returncode,
+    }
+    if isinstance(data, dict):
+        for key in ("summary", "status", "generated_at"):
+            if key in data:
+                result[key] = data[key]
+    if stderr:
+        result["error"] = _mission_control_truncate(stderr, 600)
+    return result
+
+
+def _mission_control_native_memory(
+    honcho_health: dict[str, Any],
+    local_turn_sync: dict[str, Any],
+) -> dict[str, Any]:
+    configured_raw = ""
+    try:
+        memory_config = load_config().get("memory", {})
+        if isinstance(memory_config, dict):
+            configured_raw = str(memory_config.get("provider") or "")
+    except Exception:
+        configured_raw = ""
+    configured = [part.strip() for part in configured_raw.split(",") if part.strip()]
+    plane_by_id: dict[str, dict[str, Any]] = {}
+    for plane in local_turn_sync.get("planes", []):
+        if not isinstance(plane, dict):
+            continue
+        raw_id = plane.get("plane") or plane.get("name") or plane.get("id")
+        if raw_id:
+            plane_by_id[str(raw_id).lower()] = plane
+    provider_specs = (
+        ("hindsight", "Hindsight", "hindsight"),
+        ("holographic", "Holographic Memory", "holographic"),
+        ("honcho", "Honcho.dev memory provider", "honcho"),
+    )
+    providers: list[dict[str, Any]] = []
+    for provider_id, label, plane_key in provider_specs:
+        if provider_id == "honcho":
+            ok = bool(honcho_health.get("ok"))
+            detail = honcho_health.get("status")
+        else:
+            plane = plane_by_id.get(plane_key)
+            ok = bool(plane and plane.get("ok") is not False)
+            detail = plane.get("detail") if isinstance(plane, dict) else None
+        providers.append({
+            "id": provider_id,
+            "label": label,
+            "configured": provider_id in configured,
+            "ok": ok,
+            "detail": detail,
+        })
+    return {
+        "configured": configured,
+        "providers": providers,
+    }
+
+
+def _mission_control_caveats(
+    sources: list[dict[str, Any]],
+    hosts: list[dict[str, Any]],
+    skills: list[dict[str, Any]],
+    openskills_catalog: dict[str, Any],
+    local_turn_sync: dict[str, Any],
+    contextforge: dict[str, Any],
+    contextforge_registry: dict[str, Any],
+    honcho: dict[str, Any],
+    native_memory: dict[str, Any],
+) -> list[str]:
+    caveats: list[str] = []
+    missing_sources = [source["id"] for source in sources if not source.get("exists")]
+    if missing_sources:
+        caveats.append(f"Missing OKF sources: {', '.join(missing_sources)}")
+    missing_skills = [skill["id"] for skill in skills if not skill.get("installed")]
+    if missing_skills:
+        caveats.append(f"Open Skills not installed: {', '.join(missing_skills)}")
+    missing_smoke = [skill["id"] for skill in skills if not skill.get("smoke_exists")]
+    if missing_smoke:
+        caveats.append(f"Open Skills smoke readback missing: {', '.join(missing_smoke)}")
+    if not openskills_catalog.get("exists"):
+        caveats.append("Open Skills catalog OKF source is missing")
+    if not local_turn_sync.get("ok"):
+        caveats.append("local-turn-sync health is degraded")
+    if not contextforge.get("ok"):
+        caveats.append("ContextForge health is degraded")
+    if not contextforge_registry.get("ok"):
+        caveats.append("ContextForge registry readback is degraded")
+    if not honcho.get("ok"):
+        caveats.append("Native Hermes Honcho provider is degraded")
+    for provider in native_memory.get("providers", []):
+        if isinstance(provider, dict) and provider.get("configured") and not provider.get("ok"):
+            caveats.append(f"Configured native memory provider is degraded: {provider.get('id')}")
+    caveats.append(_mission_control_host_caveat(hosts))
+    return caveats
+
+
+@app.get("/api/mission-control/byom")
+async def mission_control_byom():
+    loop = asyncio.get_running_loop()
+    contextforge_future = loop.run_in_executor(None, _mission_control_contextforge_health)
+    contextforge_registry_future = loop.run_in_executor(None, _mission_control_contextforge_registry)
+    turn_sync_future = loop.run_in_executor(None, _mission_control_local_turn_sync_health)
+    honcho_future = loop.run_in_executor(None, _mission_control_honcho_health)
+    cortex_honcho_future = loop.run_in_executor(None, _mission_control_cortex_honcho_clone_health)
+    sources = _mission_control_okf_sources()
+    hosts = _mission_control_hosts()
+    skills = _mission_control_openskills()
+    openskills_catalog = _mission_control_openskills_catalog()
+    whatsapp_inputs = _mission_control_whatsapp_inputs()
+    contextforge, contextforge_registry, local_turn_sync, honcho, cortex_honcho_clone = await asyncio.gather(
+        contextforge_future,
+        contextforge_registry_future,
+        turn_sync_future,
+        honcho_future,
+        cortex_honcho_future,
+    )
+    native_memory = _mission_control_native_memory(honcho, local_turn_sync)
+    planes = local_turn_sync.get("planes") if isinstance(local_turn_sync.get("planes"), list) else []
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sources": sources,
+        "hosts": hosts,
+        "skills": skills,
+        "openskills_catalog": openskills_catalog,
+        "memory_planes": planes,
+        "local_turn_sync": local_turn_sync,
+        "contextforge": contextforge,
+        "contextforge_registry": contextforge_registry,
+        "honcho": honcho,
+        "cortex_honcho_clone": cortex_honcho_clone,
+        "native_memory": native_memory,
+        "whatsapp_inputs": whatsapp_inputs,
+        "caveats": _mission_control_caveats(
+            sources,
+            hosts,
+            skills,
+            openskills_catalog,
+            local_turn_sync,
+            contextforge,
+            contextforge_registry,
+            honcho,
+            native_memory,
+        ),
+    }
+
+
 @app.get("/api/status")
 async def get_status(profile: Optional[str] = None):
     status_scope = None

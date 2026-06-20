@@ -312,6 +312,8 @@ function appendProfileParam(url: string, profile?: string): string {
 
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getMissionControlByom: () =>
+    fetchJSON<MissionControlByomResponse>("/api/mission-control/byom"),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).
    *
@@ -1481,6 +1483,146 @@ export interface MemoryStatus {
   active: string;
   providers: MemoryProviderInfo[];
   builtin_files: { memory: number; user: number };
+}
+
+export interface MissionControlSource {
+  id: string;
+  kind: string;
+  path: string;
+  exists: boolean;
+  title: string | null;
+  timestamp: string | null;
+  mtime: string | null;
+  byte_size: number | null;
+  error?: string;
+}
+
+export interface MissionControlHost {
+  id: string;
+  label: string;
+  role: string;
+  live_probe: boolean;
+  reachability: MissionControlHostReachability;
+}
+
+export interface MissionControlHostReachability {
+  source: string;
+  status: "online" | "unverified" | string;
+  last_seen: string | null;
+  address: string | null;
+  matched_name: string | null;
+  evidence: string | null;
+  reason: string | null;
+}
+
+export interface MissionControlSkill {
+  id: string;
+  label: string;
+  skill_path: string;
+  installed: boolean;
+  smoke_path: string;
+  smoke_exists: boolean;
+  smoke_line: string | null;
+  ok: boolean;
+}
+
+export interface MissionControlOpenSkillsCategory {
+  name: string;
+  skill_count: number;
+}
+
+export interface MissionControlOpenSkillsCatalog {
+  path: string;
+  exists: boolean;
+  title: string | null;
+  source_url: string | null;
+  skill_count: number;
+  category_count: number;
+  categories: MissionControlOpenSkillsCategory[];
+}
+
+export interface MissionControlPlane {
+  name?: string;
+  ok?: boolean;
+  status?: string;
+  detail?: string;
+  [key: string]: unknown;
+}
+
+export interface MissionControlHealth {
+  ok: boolean;
+  status?: string;
+  url?: string;
+  planes?: MissionControlPlane[];
+  exit_code?: number;
+  error?: string;
+  details?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface MissionControlContextForgeRegistrySample {
+  name: string;
+  enabled?: boolean | null;
+  reachable?: boolean | null;
+}
+
+export interface MissionControlContextForgeRegistry {
+  ok: boolean;
+  source: string;
+  gateway: {
+    title?: string | null;
+    version?: string | null;
+    role?: string | null;
+    description?: string | null;
+  };
+  counts: {
+    tools: number;
+    resources: number;
+    gateways: number;
+    servers: number;
+  };
+  samples: {
+    gateways: MissionControlContextForgeRegistrySample[];
+    servers: MissionControlContextForgeRegistrySample[];
+    resources: MissionControlContextForgeRegistrySample[];
+  };
+  error?: string;
+}
+
+export interface MissionControlNativeMemoryProvider {
+  id: string;
+  label: string;
+  configured: boolean;
+  ok: boolean;
+  detail?: string | null;
+}
+
+export interface MissionControlNativeMemory {
+  configured: string[];
+  providers: MissionControlNativeMemoryProvider[];
+}
+
+export interface MissionControlWhatsappInputs {
+  captured_at: string | null;
+  source: string;
+  bullets: string[];
+}
+
+export interface MissionControlByomResponse {
+  generated_at: string;
+  sources: MissionControlSource[];
+  hosts: MissionControlHost[];
+  skills: MissionControlSkill[];
+  openskills_catalog: MissionControlOpenSkillsCatalog;
+  memory_planes: MissionControlPlane[];
+  local_turn_sync: MissionControlHealth;
+  contextforge: MissionControlHealth;
+  contextforge_registry: MissionControlContextForgeRegistry;
+  honcho: MissionControlHealth;
+  cortex_honcho_clone: MissionControlHealth;
+  native_memory: MissionControlNativeMemory;
+  whatsapp_inputs: MissionControlWhatsappInputs;
+  caveats: string[];
 }
 
 export interface HookEntry {
