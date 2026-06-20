@@ -2016,6 +2016,73 @@ def _mission_control_reachability_from_node(node: dict[str, Any], source: str, e
     }
 
 
+def _mission_control_runtime_proof(
+    *,
+    contract: str,
+    required: bool,
+    status: str,
+    detail: str,
+    proof: str | None = None,
+    proof_id: str | None = None,
+    checked_at: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "source": "host.runtime",
+        "contract": contract,
+        "required": required,
+        "status": status,
+        "proof": proof,
+        "proof_id": proof_id,
+        "checked_at": checked_at,
+        "detail": detail,
+        "reason": reason,
+    }
+
+
+def _mission_control_unverified_runtime(
+    *,
+    contract: str,
+    required: bool,
+    detail: str,
+    reason: str = "missing-proof",
+) -> dict[str, Any]:
+    return _mission_control_runtime_proof(
+        contract=contract,
+        required=required,
+        status="unverified",
+        detail=detail,
+        reason=reason,
+    )
+
+
+def _mission_control_host_runtime_proofs() -> dict[str, dict[str, Any]]:
+    return {
+        "olivier": _mission_control_runtime_proof(
+            contract="olivier/hermes-local",
+            required=False,
+            status="ok",
+            proof="local-mission-control-request",
+            detail="Mission Control API is serving this payload from Olivier.",
+        ),
+        "aegis": _mission_control_unverified_runtime(
+            contract="aegis/mac-worker",
+            required=False,
+            detail="Aegis runtime proof is not configured for read-only Mission Control verification.",
+        ),
+        "pi": _mission_control_unverified_runtime(
+            contract="pi/openclaw",
+            required=True,
+            detail="OpenClaw runtime proof is not configured for read-only Mission Control verification.",
+        ),
+        "bill": _mission_control_unverified_runtime(
+            contract="bill/kimi-droid",
+            required=True,
+            detail="KIMI_DROID runtime proof is not configured for read-only Mission Control verification.",
+        ),
+    }
+
+
 def _mission_control_host_reachability(aliases: list[str], tailscale_status: dict[str, Any]) -> dict[str, Any]:
     source = str(tailscale_status.get("source") or _TAILSCALE_STATUS_SOURCE)
     if not tailscale_status.get("ok"):
@@ -2034,21 +2101,48 @@ def _mission_control_host_reachability(aliases: list[str], tailscale_status: dic
 
 def _mission_control_hosts() -> list[dict[str, Any]]:
     tailscale_status = _mission_control_tailscale_status()
+    runtime_proofs = _mission_control_host_runtime_proofs()
     specs = [
-        {"id": "olivier", "label": "Olivier", "role": "MacBook Pro mission control", "aliases": ["olivier", "talaria"]},
-        {"id": "aegis", "label": "Aegis", "role": "Mac mini worker host", "aliases": ["aegis"]},
-        {"id": "pi", "label": "Pi / OpenClaw", "role": "OpenClaw and edge lane", "aliases": ["pi", "openclaw"]},
-        {"id": "bill", "label": "KIMI_DROID / Bill", "role": "Android BYOM lane", "aliases": ["bill", "kimi-droid", "kimi_droid"]},
+        {
+            "id": "olivier",
+            "label": "Olivier",
+            "role": "MacBook Pro mission control",
+            "aliases": ["olivier", "talaria"],
+        },
+        {
+            "id": "aegis",
+            "label": "Aegis",
+            "role": "Mac mini worker host",
+            "aliases": ["aegis"],
+        },
+        {
+            "id": "pi",
+            "label": "Pi / OpenClaw",
+            "role": "OpenClaw and edge lane",
+            "aliases": ["pi", "openclaw"],
+        },
+        {
+            "id": "bill",
+            "label": "KIMI_DROID / Bill",
+            "role": "Android BYOM lane",
+            "aliases": ["bill", "kimi-droid", "kimi_droid"],
+        },
     ]
     hosts: list[dict[str, Any]] = []
     for spec in specs:
         reachability = _mission_control_host_reachability(spec["aliases"], tailscale_status)
+        runtime = runtime_proofs.get(str(spec["id"])) or _mission_control_unverified_runtime(
+            contract=f"{spec['id']}/unknown",
+            required=True,
+            detail="Runtime proof contract is not configured for this host.",
+        )
         hosts.append({
             "id": spec["id"],
             "label": spec["label"],
             "role": spec["role"],
             "live_probe": reachability["status"] == "online",
             "reachability": reachability,
+            "runtime": runtime,
         })
     return hosts
 
@@ -2061,6 +2155,20 @@ def _mission_control_host_caveat(hosts: list[dict[str, Any]]) -> str:
             f"unverified hosts have no live proof: {', '.join(unverified)}."
         )
     return "Host reachability uses read-only local Tailscale status only; no SSH, ADB, or remote commands are run."
+
+
+def _mission_control_host_runtime_caveat(hosts: list[dict[str, Any]]) -> str | None:
+    runtime_unverified = [
+        str(host.get("id"))
+        for host in hosts
+        if host.get("runtime", {}).get("required") and host.get("runtime", {}).get("status") != "ok"
+    ]
+    if runtime_unverified:
+        return (
+            "Host runtime proof is unverified for: "
+            f"{', '.join(runtime_unverified)}."
+        )
+    return None
 
 
 def _mission_control_openskills() -> list[dict[str, Any]]:
@@ -2503,6 +2611,13 @@ def _mission_control_byom_readiness(
     degraded_profiles = [str(profile.get("profile")) for profile in active_profiles if str(profile.get("status")) != "ok"]
     online_hosts = [str(host.get("id")) for host in hosts if host.get("reachability", {}).get("status") == "online"]
     unverified_hosts = [str(host.get("id")) for host in hosts if host.get("reachability", {}).get("status") != "online"]
+    required_runtime_hosts = [host for host in hosts if host.get("runtime", {}).get("required")]
+    runtime_ok_hosts = [str(host.get("id")) for host in required_runtime_hosts if host.get("runtime", {}).get("status") == "ok"]
+    runtime_unverified_hosts = [
+        str(host.get("id"))
+        for host in required_runtime_hosts
+        if host.get("runtime", {}).get("status") != "ok"
+    ]
     bullets = whatsapp_inputs.get("bullets") if isinstance(whatsapp_inputs.get("bullets"), list) else []
 
     checks = [
@@ -2566,6 +2681,19 @@ def _mission_control_byom_readiness(
                 if part
             ) or "no declared hosts",
         },
+        {
+            "id": "host_runtime",
+            "label": "Host runtime proof",
+            "ok": bool(required_runtime_hosts) and not runtime_unverified_hosts,
+            "detail": "; ".join(
+                part
+                for part in (
+                    f"proved: {', '.join(runtime_ok_hosts)}" if runtime_ok_hosts else "",
+                    f"unverified: {', '.join(runtime_unverified_hosts)}" if runtime_unverified_hosts else "",
+                )
+                if part
+            ) or "no required runtime hosts",
+        },
     ]
     blocked_by = [str(check["id"]) for check in checks if not check["ok"]]
     ready_count = len(checks) - len(blocked_by)
@@ -2626,6 +2754,9 @@ def _mission_control_caveats(
     if not byom_readiness.get("ok"):
         caveats.append(f"BYOM readiness is degraded: {', '.join(byom_readiness.get('blocked_by', []))}")
     caveats.append(_mission_control_host_caveat(hosts))
+    runtime_caveat = _mission_control_host_runtime_caveat(hosts)
+    if runtime_caveat:
+        caveats.append(runtime_caveat)
     return caveats
 
 

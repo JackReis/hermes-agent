@@ -279,6 +279,50 @@ Catalog size from live readback: 31 skills across 7 categories.
     assert host_by_id["bill"]["reachability"]["status"] == "unverified"
     assert host_by_id["bill"]["reachability"]["last_seen"] is None
     assert host_by_id["bill"]["reachability"]["reason"] == "not-found"
+    assert host_by_id["olivier"]["runtime"] == {
+        "source": "host.runtime",
+        "contract": "olivier/hermes-local",
+        "required": False,
+        "status": "ok",
+        "proof": "local-mission-control-request",
+        "proof_id": None,
+        "checked_at": None,
+        "detail": "Mission Control API is serving this payload from Olivier.",
+        "reason": None,
+    }
+    assert host_by_id["aegis"]["runtime"] == {
+        "source": "host.runtime",
+        "contract": "aegis/mac-worker",
+        "required": False,
+        "status": "unverified",
+        "proof": None,
+        "proof_id": None,
+        "checked_at": None,
+        "detail": "Aegis runtime proof is not configured for read-only Mission Control verification.",
+        "reason": "missing-proof",
+    }
+    assert host_by_id["pi"]["runtime"] == {
+        "source": "host.runtime",
+        "contract": "pi/openclaw",
+        "required": True,
+        "status": "unverified",
+        "proof": None,
+        "proof_id": None,
+        "checked_at": None,
+        "detail": "OpenClaw runtime proof is not configured for read-only Mission Control verification.",
+        "reason": "missing-proof",
+    }
+    assert host_by_id["bill"]["runtime"] == {
+        "source": "host.runtime",
+        "contract": "bill/kimi-droid",
+        "required": True,
+        "status": "unverified",
+        "proof": None,
+        "proof_id": None,
+        "checked_at": None,
+        "detail": "KIMI_DROID runtime proof is not configured for read-only Mission Control verification.",
+        "reason": "missing-proof",
+    }
     assert payload["honcho"]["ok"] is True
     assert payload["honcho"]["kind"] == "native-hermes-memory-provider"
     assert payload["honcho"]["connection_tested"] is False
@@ -304,10 +348,10 @@ Catalog size from live readback: 31 skills across 7 categories.
     readiness = payload["byom_readiness"]
     assert readiness["ok"] is False
     assert readiness["status"] == "degraded"
-    assert readiness["summary"] == "4/7 checks ready"
+    assert readiness["summary"] == "4/8 checks ready"
     assert readiness["ready_count"] == 4
-    assert readiness["check_count"] == 7
-    assert readiness["blocked_by"] == ["openskills_primitives", "memory_profiles", "host_reachability"]
+    assert readiness["check_count"] == 8
+    assert readiness["blocked_by"] == ["openskills_primitives", "memory_profiles", "host_reachability", "host_runtime"]
     readiness_by_id = {check["id"]: check for check in readiness["checks"]}
     assert readiness_by_id["okf_sources"]["ok"] is True
     assert readiness_by_id["contextforge_registry"]["detail"] == "10 tools / 50 resources / 2 gateways"
@@ -319,6 +363,8 @@ Catalog size from live readback: 31 skills across 7 categories.
     assert readiness_by_id["whatsapp_inputs"]["detail"] == "2 AI Exec Circle bullets captured"
     assert readiness_by_id["host_reachability"]["ok"] is False
     assert readiness_by_id["host_reachability"]["detail"] == "online: olivier; unverified: aegis, pi, bill"
+    assert readiness_by_id["host_runtime"]["ok"] is False
+    assert readiness_by_id["host_runtime"]["detail"] == "unverified: pi, bill"
 
 
 def test_mission_control_byom_degrades_when_sources_or_planes_are_missing(tmp_path, monkeypatch, _isolate_hermes_home):
@@ -422,6 +468,13 @@ def test_mission_control_byom_degrades_when_sources_or_planes_are_missing(tmp_pa
     assert payload["memory_profile_console"]["profiles"] == []
     assert all(host["reachability"]["status"] == "unverified" for host in payload["hosts"])
     assert all(host["reachability"]["source"] == "tailscale status --json" for host in payload["hosts"])
+    assert all(host["runtime"]["source"] == "host.runtime" for host in payload["hosts"])
+    assert {host["runtime"]["contract"] for host in payload["hosts"]} == {
+        "olivier/hermes-local",
+        "aegis/mac-worker",
+        "pi/openclaw",
+        "bill/kimi-droid",
+    }
     assert payload["openskills_catalog"]["exists"] is False
     assert payload["openskills_catalog"]["skill_count"] == 0
     assert payload["openskills_catalog"]["category_count"] == 0
@@ -430,9 +483,9 @@ def test_mission_control_byom_degrades_when_sources_or_planes_are_missing(tmp_pa
     readiness = payload["byom_readiness"]
     assert readiness["ok"] is False
     assert readiness["status"] == "degraded"
-    assert readiness["summary"] == "0/7 checks ready"
+    assert readiness["summary"] == "0/8 checks ready"
     assert readiness["ready_count"] == 0
-    assert readiness["check_count"] == 7
+    assert readiness["check_count"] == 8
     assert set(readiness["blocked_by"]) == {
         "okf_sources",
         "contextforge_registry",
@@ -441,8 +494,175 @@ def test_mission_control_byom_degrades_when_sources_or_planes_are_missing(tmp_pa
         "memory_profiles",
         "whatsapp_inputs",
         "host_reachability",
+        "host_runtime",
     }
     assert any("ContextForge" in caveat for caveat in payload["caveats"])
     assert any("ContextForge registry" in caveat for caveat in payload["caveats"])
     assert any("Honcho" in caveat for caveat in payload["caveats"])
     assert any("local-turn-sync" in caveat for caveat in payload["caveats"])
+    assert any("Host runtime proof" in caveat for caveat in payload["caveats"])
+
+
+def test_mission_control_byom_host_readiness_requires_runtime_proof(tmp_path, monkeypatch, _isolate_hermes_home):
+    import hermes_cli.web_server as web_server
+
+    vault = tmp_path / "vault"
+    okf_pattern = vault / "okf/fleet/patterns/byom-agent-fleet-mission-control.md"
+    okf_index = vault / "okf/fleet/index.md"
+    okf_openskills = vault / "okf/fleet/tools/openskills-core-infrastructure.md"
+    okf_openskills_catalog = vault / "okf/fleet/tools/openskills-catalog.md"
+    smoke_dir = tmp_path / "smoke"
+    skill_root = tmp_path / "skills/openskills"
+    profile_log_dir = tmp_path / "memory-profile-logs"
+
+    okf_pattern.parent.mkdir(parents=True, exist_ok=True)
+    okf_index.parent.mkdir(parents=True, exist_ok=True)
+    okf_openskills.parent.mkdir(parents=True, exist_ok=True)
+    smoke_dir.mkdir(parents=True)
+    profile_log_dir.mkdir(parents=True)
+
+    okf_index.write_text("# Fleet OKF\n", encoding="utf-8")
+    okf_pattern.write_text(
+        """---
+title: BYOM Agent Fleet Mission Control
+---
+
+# BYOM Agent Fleet Mission Control
+
+## Latest AI Exec Circle Inputs
+- OpenRouter multi model option looks interesting.
+""",
+        encoding="utf-8",
+    )
+    okf_openskills.write_text(
+        """---
+title: OpenSkills Core Infrastructure
+source_url: https://unlock-ai.natebjones.com/open-skills/core-infrastructure
+---
+""",
+        encoding="utf-8",
+    )
+    okf_openskills_catalog.write_text(
+        """---
+title: Open Skills Catalog
+source_url: https://unlock-ai.natebjones.com/open-skills
+---
+
+# Open Skills Catalog
+
+Catalog size from live readback: 31 skills across 7 categories.
+""",
+        encoding="utf-8",
+    )
+    for skill_id, _label in web_server._OPENSKILLS_PRIMITIVES:
+        (smoke_dir / f"{skill_id}.txt").write_text("ok\n", encoding="utf-8")
+        (skill_root / skill_id).mkdir(parents=True)
+        (skill_root / skill_id / "SKILL.md").write_text(f"# {skill_id}\n", encoding="utf-8")
+    for profile in ("memory-honcho-dev", "memory-hindsight", "memory-holographic"):
+        (profile_log_dir / f"{profile}.log").write_text(
+            f"""{{"profile":"{profile}","provider":"{profile}","role":"native","status":"ok","proof":"write-readback","transition_only":false,"not_honcho_dev_proof":false,"ts":"2026-06-20T04:15:54Z"}}\n""",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(web_server, "_MISSION_CONTROL_VAULT", vault, raising=False)
+    monkeypatch.setattr(web_server, "_OKF_INDEX", okf_index, raising=False)
+    monkeypatch.setattr(web_server, "_OKF_BYOM", okf_pattern, raising=False)
+    monkeypatch.setattr(web_server, "_OKF_OPENSKILLS", okf_openskills, raising=False)
+    monkeypatch.setattr(web_server, "_OKF_OPENSKILLS_CATALOG", okf_openskills_catalog, raising=False)
+    monkeypatch.setattr(web_server, "_OPENSKILLS_SMOKE_DIR", smoke_dir, raising=False)
+    monkeypatch.setattr(web_server, "_OPENSKILLS_SKILL_ROOT", skill_root, raising=False)
+    monkeypatch.setattr(web_server, "_MEMORY_PROFILE_LOG_DIR", profile_log_dir, raising=False)
+    monkeypatch.setattr(web_server, "_mission_control_contextforge_health", lambda: {"ok": True}, raising=False)
+    monkeypatch.setattr(
+        web_server,
+        "_mission_control_contextforge_registry",
+        lambda: {
+            "ok": True,
+            "counts": {"tools": 10, "resources": 50, "gateways": 2, "servers": 2},
+            "samples": {"gateways": [], "servers": [], "resources": []},
+            "gateway": {},
+            "source": "http://127.0.0.1:8090",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_mission_control_local_turn_sync_health",
+        lambda: {"ok": True, "planes": [{"plane": "hindsight", "ok": True}, {"plane": "holographic", "ok": True}]},
+        raising=False,
+    )
+    monkeypatch.setattr(web_server, "_mission_control_honcho_health", lambda: {"ok": True, "status": "configured"}, raising=False)
+    monkeypatch.setattr(web_server, "_mission_control_cortex_honcho_clone_health", lambda: {"ok": True}, raising=False)
+    monkeypatch.setattr(
+        web_server,
+        "_mission_control_native_memory",
+        lambda honcho_health, local_turn_sync: {
+            "configured": ["hindsight", "holographic", "honcho"],
+            "providers": [
+                {"id": "hindsight", "label": "Hindsight", "configured": True, "ok": True},
+                {"id": "holographic", "label": "Holographic Memory", "configured": True, "ok": True},
+                {"id": "honcho", "label": "Honcho", "configured": True, "ok": True},
+            ],
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_mission_control_tailscale_status",
+        lambda: {
+            "ok": True,
+            "source": "tailscale status --json",
+            "self": {"HostName": "olivier", "TailscaleIPs": ["100.64.0.1"], "Online": True},
+            "peers": [
+                {"HostName": "aegis", "TailscaleIPs": ["100.64.0.2"], "Online": True},
+                {"HostName": "pi", "TailscaleIPs": ["100.64.0.3"], "Online": True},
+                {"HostName": "bill", "TailscaleIPs": ["100.64.0.4"], "Online": True},
+            ],
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(web_server, "_mission_control_host_runtime_proofs", lambda: {
+        "olivier": web_server._mission_control_runtime_proof(
+            contract="olivier/hermes-local",
+            required=False,
+            status="ok",
+            proof="local-mission-control-request",
+            detail="Mission Control API is serving this payload from Olivier.",
+        ),
+        "aegis": web_server._mission_control_unverified_runtime(
+            contract="aegis/mac-worker",
+            required=False,
+            detail="Aegis runtime proof is not configured for read-only Mission Control verification.",
+        ),
+        "pi": web_server._mission_control_runtime_proof(
+            contract="pi/openclaw",
+            required=True,
+            status="ok",
+            proof="contextforge-dev-mcp-roundtrip",
+            proof_id="openclaw-contextforge-proof",
+            detail="OpenClaw health readback ok",
+        ),
+        "bill": web_server._mission_control_unverified_runtime(
+            contract="bill/kimi-droid",
+            required=True,
+            reason="missing-proof",
+            detail="no live device proof",
+        ),
+    }, raising=False)
+
+    response = _client().get("/api/mission-control/byom")
+
+    assert response.status_code == 200
+    payload = response.json()
+    host_by_id = {host["id"]: host for host in payload["hosts"]}
+    assert host_by_id["pi"]["runtime"]["status"] == "ok"
+    assert host_by_id["pi"]["runtime"]["proof"] == "contextforge-dev-mcp-roundtrip"
+    assert host_by_id["pi"]["runtime"]["proof_id"] == "openclaw-contextforge-proof"
+    assert host_by_id["bill"]["runtime"]["status"] == "unverified"
+    readiness_by_id = {check["id"]: check for check in payload["byom_readiness"]["checks"]}
+    assert readiness_by_id["host_reachability"]["ok"] is True
+    assert readiness_by_id["host_reachability"]["detail"] == "online: olivier, aegis, pi, bill"
+    assert readiness_by_id["host_runtime"]["ok"] is False
+    assert readiness_by_id["host_runtime"]["detail"] == "proved: pi; unverified: bill"
+    assert payload["byom_readiness"]["summary"] == "7/8 checks ready"
+    assert payload["byom_readiness"]["blocked_by"] == ["host_runtime"]

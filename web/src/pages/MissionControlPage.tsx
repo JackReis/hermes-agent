@@ -67,6 +67,12 @@ function ReachabilityBadge({ status }: { status: string }) {
   return <Badge tone="warning">{status}</Badge>;
 }
 
+function RuntimeBadge({ status }: { status: string }) {
+  if (status === "ok") return <Badge tone="success">runtime ok</Badge>;
+  if (status === "degraded") return <Badge tone="destructive">runtime degraded</Badge>;
+  return <Badge tone="warning">runtime {status}</Badge>;
+}
+
 function SourceRow({ source }: { source: MissionControlSource }) {
   return (
     <div className="grid gap-2 border-b border-border/60 py-3 last:border-0 md:grid-cols-[1.25fr_1fr_auto] md:items-center">
@@ -581,7 +587,9 @@ export default function MissionControlPage() {
                   <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <span className="text-sm font-medium">{host.label}</span>
                     <ReachabilityBadge status={host.reachability.status} />
+                    <RuntimeBadge status={host.runtime.status} />
                     <Badge tone="secondary">{host.reachability.evidence ?? "local"}</Badge>
+                    {host.runtime.required && <Badge tone="secondary">runtime required</Badge>}
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">{host.role}</div>
                   <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
@@ -596,6 +604,16 @@ export default function MissionControlPage() {
                       {host.reachability.reason && (
                         <span>{host.reachability.reason}</span>
                       )}
+                    </div>
+                    <div className="truncate text-foreground/80">
+                      {host.runtime.contract}: {host.runtime.detail ?? host.runtime.status}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-1">
+                      <span className="font-mono">{host.runtime.source}</span>
+                      {host.runtime.proof && <span>{host.runtime.proof}</span>}
+                      {host.runtime.proof_id && <span className="font-mono">{host.runtime.proof_id}</span>}
+                      {host.runtime.checked_at && <span>checked {formatDate(host.runtime.checked_at)}</span>}
+                      {host.runtime.reason && <span>{host.runtime.reason}</span>}
                     </div>
                   </div>
                 </div>

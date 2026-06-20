@@ -1503,6 +1503,7 @@ export interface MissionControlHost {
   role: string;
   live_probe: boolean;
   reachability: MissionControlHostReachability;
+  runtime: MissionControlHostRuntime;
 }
 
 export interface MissionControlHostReachability {
@@ -1512,6 +1513,18 @@ export interface MissionControlHostReachability {
   address: string | null;
   matched_name: string | null;
   evidence: string | null;
+  reason: string | null;
+}
+
+export interface MissionControlHostRuntime {
+  source: "host.runtime" | string;
+  contract: string;
+  required: boolean;
+  status: "ok" | "unverified" | "degraded" | string;
+  proof: string | null;
+  proof_id: string | null;
+  checked_at: string | null;
+  detail: string | null;
   reason: string | null;
 }
 
