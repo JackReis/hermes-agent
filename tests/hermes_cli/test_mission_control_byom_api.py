@@ -301,6 +301,24 @@ Catalog size from live readback: 31 skills across 7 categories.
     assert profile_by_id["memory-honcho-dev"]["status"] == "degraded"
     assert profile_by_id["memory-cortex-mirror"]["transition_only"] is True
     assert profile_by_id["memory-cortex-mirror"]["not_honcho_dev_proof"] is True
+    readiness = payload["byom_readiness"]
+    assert readiness["ok"] is False
+    assert readiness["status"] == "degraded"
+    assert readiness["summary"] == "4/7 checks ready"
+    assert readiness["ready_count"] == 4
+    assert readiness["check_count"] == 7
+    assert readiness["blocked_by"] == ["openskills_primitives", "memory_profiles", "host_reachability"]
+    readiness_by_id = {check["id"]: check for check in readiness["checks"]}
+    assert readiness_by_id["okf_sources"]["ok"] is True
+    assert readiness_by_id["contextforge_registry"]["detail"] == "10 tools / 50 resources / 2 gateways"
+    assert readiness_by_id["openskills_catalog"]["detail"] == "31 skills / 7 categories"
+    assert readiness_by_id["openskills_primitives"]["ok"] is False
+    assert readiness_by_id["openskills_primitives"]["detail"] == "1/5 primitive checks ready"
+    assert readiness_by_id["memory_profiles"]["ok"] is False
+    assert readiness_by_id["memory_profiles"]["detail"] == "ok: memory-hindsight; degraded: memory-honcho-dev"
+    assert readiness_by_id["whatsapp_inputs"]["detail"] == "2 AI Exec Circle bullets captured"
+    assert readiness_by_id["host_reachability"]["ok"] is False
+    assert readiness_by_id["host_reachability"]["detail"] == "online: olivier; unverified: aegis, pi, bill"
 
 
 def test_mission_control_byom_degrades_when_sources_or_planes_are_missing(tmp_path, monkeypatch, _isolate_hermes_home):
@@ -409,6 +427,21 @@ def test_mission_control_byom_degrades_when_sources_or_planes_are_missing(tmp_pa
     assert payload["openskills_catalog"]["category_count"] == 0
     assert all(source["exists"] is False for source in payload["sources"])
     assert all(skill["ok"] is False for skill in payload["skills"])
+    readiness = payload["byom_readiness"]
+    assert readiness["ok"] is False
+    assert readiness["status"] == "degraded"
+    assert readiness["summary"] == "0/7 checks ready"
+    assert readiness["ready_count"] == 0
+    assert readiness["check_count"] == 7
+    assert set(readiness["blocked_by"]) == {
+        "okf_sources",
+        "contextforge_registry",
+        "openskills_catalog",
+        "openskills_primitives",
+        "memory_profiles",
+        "whatsapp_inputs",
+        "host_reachability",
+    }
     assert any("ContextForge" in caveat for caveat in payload["caveats"])
     assert any("ContextForge registry" in caveat for caveat in payload["caveats"])
     assert any("Honcho" in caveat for caveat in payload["caveats"])

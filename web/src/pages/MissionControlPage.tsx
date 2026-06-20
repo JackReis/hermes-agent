@@ -22,6 +22,7 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import type {
+  MissionControlByomReadiness,
   MissionControlByomResponse,
   MissionControlContextForgeRegistry,
   MissionControlContextForgeRegistrySample,
@@ -220,6 +221,55 @@ function HealthPanel({
   );
 }
 
+function ByomReadinessPanel({ readiness }: { readiness: MissionControlByomReadiness }) {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <ShieldCheck className="h-5 w-5 shrink-0 text-muted-foreground" />
+            <CardTitle className="truncate text-base">BYOM readiness</CardTitle>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone={readiness.ok ? "success" : "warning"}>
+              {readiness.summary}
+            </Badge>
+            <HealthPill ok={readiness.ok} label={readiness.status} />
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {readiness.checks.map((check) => (
+            <div key={check.id} className="rounded border border-border/70 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{check.label}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">{check.detail}</div>
+                </div>
+                {check.ok ? (
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-green-500" />
+                ) : (
+                  <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        {readiness.blocked_by.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {readiness.blocked_by.map((id) => (
+              <Badge key={id} tone="warning">
+                {id}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function MemoryProfileConsolePanel({ console }: { console: MissionControlMemoryProfileConsole }) {
   return (
     <Card>
@@ -401,6 +451,11 @@ export default function MissionControlPage() {
     setAfterTitle(
       <div className="flex flex-wrap items-center gap-2">
         {data && (
+          <Badge tone={data.byom_readiness.ok ? "success" : "warning"}>
+            {data.byom_readiness.status}
+          </Badge>
+        )}
+        {data && (
           <Badge tone={data.caveats.length ? "warning" : "success"}>
             {data.caveats.length ? `${data.caveats.length} caveats` : "clear"}
           </Badge>
@@ -493,6 +548,8 @@ export default function MissionControlPage() {
           </CardContent>
         </Card>
       </div>
+
+      <ByomReadinessPanel readiness={data.byom_readiness} />
 
       <div className="grid gap-5 xl:grid-cols-[1.15fr_0.85fr]">
         <Card>

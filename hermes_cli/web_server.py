@@ -2481,6 +2481,105 @@ def _mission_control_native_memory(
     }
 
 
+def _mission_control_byom_readiness(
+    sources: list[dict[str, Any]],
+    hosts: list[dict[str, Any]],
+    skills: list[dict[str, Any]],
+    openskills_catalog: dict[str, Any],
+    contextforge_registry: dict[str, Any],
+    memory_profile_console: dict[str, Any],
+    whatsapp_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    source_count = len(sources)
+    present_sources = [source for source in sources if source.get("exists")]
+    skill_count = len(skills)
+    ready_skills = [skill for skill in skills if skill.get("ok")]
+    catalog_skill_count = int(openskills_catalog.get("skill_count") or 0)
+    catalog_category_count = int(openskills_catalog.get("category_count") or 0)
+    registry_counts = contextforge_registry.get("counts") if isinstance(contextforge_registry.get("counts"), dict) else {}
+    profiles = [profile for profile in memory_profile_console.get("profiles", []) if isinstance(profile, dict)]
+    active_profiles = [profile for profile in profiles if not profile.get("transition_only")]
+    healthy_profiles = [str(profile.get("profile")) for profile in active_profiles if str(profile.get("status")) == "ok"]
+    degraded_profiles = [str(profile.get("profile")) for profile in active_profiles if str(profile.get("status")) != "ok"]
+    online_hosts = [str(host.get("id")) for host in hosts if host.get("reachability", {}).get("status") == "online"]
+    unverified_hosts = [str(host.get("id")) for host in hosts if host.get("reachability", {}).get("status") != "online"]
+    bullets = whatsapp_inputs.get("bullets") if isinstance(whatsapp_inputs.get("bullets"), list) else []
+
+    checks = [
+        {
+            "id": "okf_sources",
+            "label": "OKF sources",
+            "ok": source_count > 0 and len(present_sources) == source_count,
+            "detail": f"{len(present_sources)}/{source_count} sources present",
+        },
+        {
+            "id": "contextforge_registry",
+            "label": "ContextForge registry",
+            "ok": bool(contextforge_registry.get("ok")),
+            "detail": (
+                f"{int(registry_counts.get('tools') or 0)} tools / "
+                f"{int(registry_counts.get('resources') or 0)} resources / "
+                f"{int(registry_counts.get('gateways') or 0)} gateways"
+            ),
+        },
+        {
+            "id": "openskills_catalog",
+            "label": "Open Skills catalog",
+            "ok": bool(openskills_catalog.get("exists")) and catalog_skill_count > 0 and catalog_category_count > 0,
+            "detail": f"{catalog_skill_count} skills / {catalog_category_count} categories",
+        },
+        {
+            "id": "openskills_primitives",
+            "label": "Open Skills primitives",
+            "ok": skill_count > 0 and len(ready_skills) == skill_count,
+            "detail": f"{len(ready_skills)}/{skill_count} primitive checks ready",
+        },
+        {
+            "id": "memory_profiles",
+            "label": "Memory profiles",
+            "ok": bool(memory_profile_console.get("ok")),
+            "detail": "; ".join(
+                part
+                for part in (
+                    f"ok: {', '.join(healthy_profiles)}" if healthy_profiles else "",
+                    f"degraded: {', '.join(degraded_profiles)}" if degraded_profiles else "",
+                )
+                if part
+            ) or "no active memory profile proof",
+        },
+        {
+            "id": "whatsapp_inputs",
+            "label": "AI Exec Circle inputs",
+            "ok": bool(bullets),
+            "detail": f"{len(bullets)} AI Exec Circle bullets captured",
+        },
+        {
+            "id": "host_reachability",
+            "label": "Cross-machine hosts",
+            "ok": bool(hosts) and not unverified_hosts,
+            "detail": "; ".join(
+                part
+                for part in (
+                    f"online: {', '.join(online_hosts)}" if online_hosts else "",
+                    f"unverified: {', '.join(unverified_hosts)}" if unverified_hosts else "",
+                )
+                if part
+            ) or "no declared hosts",
+        },
+    ]
+    blocked_by = [str(check["id"]) for check in checks if not check["ok"]]
+    ready_count = len(checks) - len(blocked_by)
+    return {
+        "ok": not blocked_by,
+        "status": "ready" if not blocked_by else "degraded",
+        "summary": f"{ready_count}/{len(checks)} checks ready",
+        "ready_count": ready_count,
+        "check_count": len(checks),
+        "blocked_by": blocked_by,
+        "checks": checks,
+    }
+
+
 def _mission_control_caveats(
     sources: list[dict[str, Any]],
     hosts: list[dict[str, Any]],
@@ -2492,6 +2591,7 @@ def _mission_control_caveats(
     honcho: dict[str, Any],
     native_memory: dict[str, Any],
     memory_profile_console: dict[str, Any],
+    byom_readiness: dict[str, Any],
 ) -> list[str]:
     caveats: list[str] = []
     missing_sources = [source["id"] for source in sources if not source.get("exists")]
@@ -2523,6 +2623,8 @@ def _mission_control_caveats(
     for provider in native_memory.get("providers", []):
         if isinstance(provider, dict) and provider.get("configured") and not provider.get("ok"):
             caveats.append(f"Configured native memory provider is degraded: {provider.get('id')}")
+    if not byom_readiness.get("ok"):
+        caveats.append(f"BYOM readiness is degraded: {', '.join(byom_readiness.get('blocked_by', []))}")
     caveats.append(_mission_control_host_caveat(hosts))
     return caveats
 
@@ -2551,11 +2653,21 @@ async def mission_control_byom():
     )
     native_memory = _mission_control_native_memory(honcho, local_turn_sync)
     planes = local_turn_sync.get("planes") if isinstance(local_turn_sync.get("planes"), list) else []
+    byom_readiness = _mission_control_byom_readiness(
+        sources,
+        hosts,
+        skills,
+        openskills_catalog,
+        contextforge_registry,
+        memory_profile_console,
+        whatsapp_inputs,
+    )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "sources": sources,
         "hosts": hosts,
         "skills": skills,
+        "byom_readiness": byom_readiness,
         "openskills_catalog": openskills_catalog,
         "memory_planes": planes,
         "local_turn_sync": local_turn_sync,
@@ -2577,6 +2689,7 @@ async def mission_control_byom():
             honcho,
             native_memory,
             memory_profile_console,
+            byom_readiness,
         ),
     }
 

@@ -1630,11 +1630,29 @@ export interface MissionControlWhatsappInputs {
   bullets: string[];
 }
 
+export interface MissionControlByomReadinessCheck {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface MissionControlByomReadiness {
+  ok: boolean;
+  status: "ready" | "degraded" | string;
+  summary: string;
+  ready_count: number;
+  check_count: number;
+  blocked_by: string[];
+  checks: MissionControlByomReadinessCheck[];
+}
+
 export interface MissionControlByomResponse {
   generated_at: string;
   sources: MissionControlSource[];
   hosts: MissionControlHost[];
   skills: MissionControlSkill[];
+  byom_readiness: MissionControlByomReadiness;
   openskills_catalog: MissionControlOpenSkillsCatalog;
   memory_planes: MissionControlPlane[];
   local_turn_sync: MissionControlHealth;
