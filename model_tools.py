@@ -31,17 +31,6 @@ import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
-from tools.registry import (
-    CHECK_FN_CACHE_BYPASS,
-    check_fn_cache_scope,
-    discover_builtin_tools,
-    registry,
-    tool_error,
-)
-from toolsets import resolve_toolset, validate_toolset
-
-logger = logging.getLogger(__name__)
-
 _post_tool_call_hook_suppressed: ContextVar[bool] = ContextVar(
     "post_tool_call_hook_suppressed", default=False
 )
@@ -55,6 +44,26 @@ def suppress_post_tool_call_hook():
         yield
     finally:
         _post_tool_call_hook_suppressed.reset(token)
+
+try:
+    from tools.registry import (
+        CHECK_FN_CACHE_BYPASS,
+        check_fn_cache_scope,
+        discover_builtin_tools,
+        registry,
+        tool_error,
+    )
+except ImportError as _e:
+    pass
+
+try:
+    from toolsets import resolve_toolset, validate_toolset
+except ImportError as _e:
+    pass
+
+logger = logging.getLogger(__name__)
+
+
 
 # Tracks platform-bundle names already flagged in disabled_toolsets so the
 # advisory (#33924) is logged once per name, not on every tool recompute.
@@ -227,7 +236,10 @@ def _run_async(coro):
 # Tool Discovery  (importing each module triggers its registry.register calls)
 # =============================================================================
 
-discover_builtin_tools()
+try:
+    discover_builtin_tools()
+except Exception as _e:
+    logger.warning("Tool discovery failed: %s", _e)
 
 # MCP tool discovery (external MCP servers from config) used to run here as
 # a module-level side effect.  It was removed because discover_mcp_tools()
