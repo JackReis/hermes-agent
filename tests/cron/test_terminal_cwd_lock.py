@@ -298,3 +298,42 @@ def test_cwd_lock_timeout_derivation(monkeypatch):
     assert sched._cwd_lock_timeout_seconds() == 660.0
     monkeypatch.setenv("HERMES_CRON_TIMEOUT", "bogus")
     assert sched._cwd_lock_timeout_seconds() == 660.0
+
+
+def test_queued_writer_restores_post_wait_baseline(monkeypatch, tmp_path):
+    """A queued writer must not restore its predecessor's temporary cwd."""
+    from unittest.mock import MagicMock, patch
+    import cron.scheduler as sched
+
+    monkeypatch.setenv("TERMINAL_CWD", "/predecessor/temporary")
+    real_lock = sched._terminal_cwd_lock
+
+    class PredecessorFinishesBeforeAcquire:
+        def acquire_write(self, timeout=None):
+            # Model the prior writer restoring its baseline while this job waits.
+            os.environ["TERMINAL_CWD"] = "/scheduler/baseline"
+            return real_lock.acquire_write(timeout=timeout)
+
+        def release_write(self):
+            real_lock.release_write()
+
+    monkeypatch.setattr(sched, "_terminal_cwd_lock", PredecessorFinishesBeforeAcquire())
+    real_info = sched.logger.info
+
+    def stop_before_agent(msg, *args, **kwargs):
+        if isinstance(msg, str) and "using workdir" in msg:
+            raise RuntimeError("stop before any agent or external work")
+        return real_info(msg, *args, **kwargs)
+
+    with patch("cron.scheduler._hermes_home", tmp_path), \
+         patch("cron.scheduler._resolve_origin", return_value=None), \
+         patch("hermes_state.SessionDB", return_value=MagicMock()), \
+         patch.object(sched.logger, "info", side_effect=stop_before_agent):
+        success, _, _, _ = sched.run_job({
+            "id": "queued-writer", "name": "queued writer", "prompt": "unused",
+            "workdir": str(tmp_path),
+        })
+    assert success is False
+    assert os.environ["TERMINAL_CWD"] == "/scheduler/baseline"
+    assert real_lock.acquire_write(timeout=0.05)
+    real_lock.release_write()

@@ -5468,11 +5468,10 @@ def run_job(
     # checks _SESSION_CWD first, so gateway sessions with no override see
     # their own cwd, not the cron's workdir (#69396).
 
-    # Snapshot the current env value BEFORE acquiring the lock so the finally
-    # below can always restore it, even if an exception fires before we set the
-    # override inside the try.  This read can't leak the lock (it precedes the
-    # acquire) and is a no-op for workdir-less jobs (they never mutate the env).
-    _prior_terminal_cwd = os.environ.get("TERMINAL_CWD", "_UNSET_")
+    # Capture the baseline only after acquiring the writer lock: a queued
+    # writer can otherwise snapshot its predecessor's temporary override.
+    _prior_terminal_cwd = "_UNSET_"
+    _cwd_env_overridden = False
 
     _holds_cwd_write = _job_workdir is not None
     _cwd_lock_timeout = _cwd_lock_timeout_seconds()
@@ -5535,7 +5534,9 @@ def run_job(
         # at the run_conversation hop carries this into the agent thread.
         _non_dispatcher_token = enter_non_dispatcher_owned_context()
         if _job_workdir:
+            _prior_terminal_cwd = os.environ.get("TERMINAL_CWD", "_UNSET_")
             os.environ["TERMINAL_CWD"] = _job_workdir
+            _cwd_env_overridden = True
             logger.info("Job '%s': using workdir %s", job_id, _job_workdir)
 
         # Re-read .env and config.yaml fresh every run so provider/key
@@ -6350,7 +6351,7 @@ def run_job(
         # the write lock — a fail-closed timeout raised before the env-set,
         # so restoring there would replay a pre-wait snapshot over the
         # ACTIVE holder's live override.
-        if _job_workdir and _cwd_lock_acquired:
+        if _cwd_env_overridden:
             if _prior_terminal_cwd == "_UNSET_":
                 os.environ.pop("TERMINAL_CWD", None)
             else:
