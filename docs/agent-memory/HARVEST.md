@@ -114,3 +114,14 @@ Shipped under `plugins/memory/`. New backends do not land as new directories her
 `hermes memory setup` writes `memory.provider` and walks `get_config_schema()`. Secret fields go to `.env`. Non-secrets go to `save_config(values, hermes_home)`. `post_setup()` overrides the generic wizard (Honcho, Hindsight).
 
 Per-adapter identity, storage, and tools are in `BRANCHES.md`. Legal collapses and forbidden inventions are in `SIMPLIFICATIONS.md`. The machine index is `INDEX.json`.
+
+## Fleet trust guidelines
+
+Vault and skill source of truth is Fleet information unification (AEGI-164/AEGI-186): skill `fleet-information-unification`, vault `Architecture/fleet/FLEET-INFORMATION-UNIFICATION-DOCTRINE-20260927.md`. Multica AEGI-186 is that doctrine. Pointers only; no product change.
+
+Fleet SoT map: Multica assigns · Open Engine protocol · Kata closes · Hermes executes · Ringer receipts · prover proves · Vault narrative · Dune constraints.
+
+1. Prefer Cursor cloud for draft/review.
+2. Trust rotation: Claude Code → ChatGPT/Codex → Gemini (Antigravity) → Kimi.
+3. Soft ship: draft → review → Multica stamp → apply (profile-mutate way-of-work).
+4. CoS may soft-ship after stamp; Jack-gated: `--replace`, secrets, spend, irreversible.

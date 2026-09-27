@@ -4,6 +4,8 @@ The Chief of Staff seat routes work. It does not become a ninth memory backend, 
 
 Meeting constraint, not a Hermes feature: [AI Executive Circle, 2026-09-19](granola://meeting/440e5c33-3e53-4c1c-b7e2-1c3025488183). Keep planes separate. Plug in the plane the task needs. One well-scoped primary agent plus a QA pass. Do not claim autonomous completion without an inspectable deliverable.
 
+Review-seat and soft-ship trust for this harvest is in `HARVEST.md` (Fleet trust guidelines) and `INDEX.json` (`fleet_information_unification`).
+
 ## Legal simplifications
 
 These collapses match the code. Use them.
