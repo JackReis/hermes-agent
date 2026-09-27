@@ -117,11 +117,11 @@ Per-adapter identity, storage, and tools are in `BRANCHES.md`. Legal collapses a
 
 ## Fleet trust guidelines
 
-Vault and skill source of truth is Fleet information unification (AEGI-164/AEGI-186). Multica AEGI-186 is the fleet information unification doctrine for this harvest. Pointers only; no product change.
+Vault and skill source of truth is Fleet information unification (AEGI-164/AEGI-186): skill `fleet-information-unification`, vault `Architecture/fleet/FLEET-INFORMATION-UNIFICATION-DOCTRINE-20260927.md`. Multica AEGI-186 is that doctrine. Pointers only; no product change.
 
 Fleet SoT map: Multica assigns · Open Engine protocol · Kata closes · Hermes executes · Ringer receipts · prover proves · Vault narrative · Dune constraints.
 
-1. Prefer Cursor cloud for harvest/draft/review.
-2. Rotate review seats: Claude Code → ChatGPT/Codex → Gemini (Antigravity) → Kimi.
+1. Prefer Cursor cloud for draft/review.
+2. Trust rotation: Claude Code → ChatGPT/Codex → Gemini (Antigravity) → Kimi.
 3. Soft ship: draft → review → Multica stamp → apply (profile-mutate way-of-work).
 4. CoS may soft-ship after stamp; Jack-gated: `--replace`, secrets, spend, irreversible.
