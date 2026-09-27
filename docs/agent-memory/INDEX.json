@@ -1,0 +1,153 @@
+{
+  "harvest_date": "2026-09-27",
+  "audience": "Jack / CoS",
+  "seat": "multi-provider gateway",
+  "repo": "hermes-agent",
+  "docs_only": true,
+  "meeting_provenance": {
+    "title": "Ankit Patel x Jack - AI Executive Circle",
+    "date": "2026-09-19",
+    "url": "granola://meeting/440e5c33-3e53-4c1c-b7e2-1c3025488183",
+    "implemented_in_this_repo": false,
+    "use": "Seat constraints only. Drive, Open Brains, AWS stores, JEV, and per-vendor liaison agents are not Hermes memory providers."
+  },
+  "files": [
+    "docs/agent-memory/HARVEST.md",
+    "docs/agent-memory/BRANCHES.md",
+    "docs/agent-memory/SIMPLIFICATIONS.md",
+    "docs/agent-memory/INDEX.json"
+  ],
+  "code_anchors": [
+    "agent/memory_provider.py",
+    "agent/memory_manager.py",
+    "agent/agent_init.py",
+    "plugins/memory/__init__.py",
+    "tools/memory_tool.py",
+    "hermes_cli/profiles.py",
+    "hermes_cli/main.py",
+    "hermes_cli/config.py",
+    "hermes_cli/memory_setup.py",
+    "gateway/session.py",
+    "cron/scheduler.py",
+    "tools/delegate_tool.py"
+  ],
+  "profile_route": {
+    "unit": "one process = one HERMES_HOME = one profile",
+    "default_home": "~/.hermes",
+    "named_home": "~/.hermes/profiles/<name>/",
+    "bind_order": [
+      "--profile/-p",
+      "HERMES_HOME whose parent directory is profiles",
+      "<hermes-root>/active_profile (skip when value is default)",
+      "else default home"
+    ],
+    "agent_identity": "get_active_profile_name(): default | <profile id> | custom",
+    "agent_workspace": "hermes",
+    "session_key_includes_profile": false,
+    "session_key_builder": "gateway/session.py build_session_key",
+    "session_key_prefix": "agent:main:{platform}:{chat_type}:..."
+  },
+  "planes": {
+    "curated": {
+      "class": "tools/memory_tool.py MemoryStore",
+      "not_a_memory_provider": true,
+      "paths": ["$HERMES_HOME/memories/MEMORY.md", "$HERMES_HOME/memories/USER.md"],
+      "flags": ["memory.memory_enabled", "memory.user_profile_enabled"],
+      "tool": "memory",
+      "actions": ["add", "replace", "remove", "read"],
+      "delimiter": "\\n§\\n",
+      "default_char_limits": {"memory": 2200, "user": 1375},
+      "prompt_injection": "frozen snapshot at session start",
+      "threat_scope": "strict"
+    },
+    "external": {
+      "selector": "memory.provider",
+      "empty_means": "curated only",
+      "max_active": 1,
+      "manager": "agent/memory_manager.py MemoryManager",
+      "discovery": "plugins/memory bundled first, then $HERMES_HOME/plugins; bundled wins name collisions",
+      "in_tree_closed": true,
+      "tool_injection": "enabled_toolsets is null or contains memory"
+    }
+  },
+  "providers": [
+    {
+      "name": "honcho",
+      "storage": "$HERMES_HOME/honcho.json",
+      "identity": "gateway_session_key beats CLI sessionStrategy; user_id and user_id_alt are peer names",
+      "skips": ["cron", "flush", "platform=cron"],
+      "tools": ["honcho_profile", "honcho_search", "honcho_reasoning", "honcho_context", "honcho_conclude"]
+    },
+    {
+      "name": "hindsight",
+      "storage": "$HERMES_HOME/hindsight/config.json",
+      "identity": "bank_id_template placeholders profile, workspace, platform, user, session; else static bank_id default hermes",
+      "tools": ["hindsight_retain", "hindsight_recall", "hindsight_reflect"]
+    },
+    {
+      "name": "mem0",
+      "storage": "$HERMES_HOME/mem0.json",
+      "identity": "user_id from gateway else config else hermes-user; agent_id from config else hermes; ignores agent_identity",
+      "tools": ["mem0_profile", "mem0_search", "mem0_conclude"]
+    },
+    {
+      "name": "supermemory",
+      "storage": "$HERMES_HOME/supermemory.json",
+      "identity": "container tag from env or config; {identity} replaced with agent_identity",
+      "writes_disabled_for": ["cron", "flush", "subagent"],
+      "tools": ["supermemory_store", "supermemory_search", "supermemory_forget", "supermemory_profile"]
+    },
+    {
+      "name": "retaindb",
+      "storage": "$HERMES_HOME/retaindb_queue.db",
+      "identity": "RETAINDB_PROJECT else hermes-<basename(home)> else default when basename is .hermes; user_id from kwargs else default; agent_id default hermes",
+      "tools": ["retaindb_profile", "retaindb_search", "retaindb_context", "retaindb_remember", "retaindb_forget", "retaindb_upload_file", "retaindb_list_files", "retaindb_read_file", "retaindb_ingest_file", "retaindb_delete_file"]
+    },
+    {
+      "name": "openviking",
+      "storage": "remote endpoint",
+      "identity": "OPENVIKING_ACCOUNT, OPENVIKING_USER, OPENVIKING_AGENT env only; gateway user_id ignored",
+      "tools": ["viking_search", "viking_read", "viking_browse", "viking_remember", "viking_add_resource"]
+    },
+    {
+      "name": "holographic",
+      "storage": "$HERMES_HOME/memory_store.db",
+      "identity": "one sqlite file per HERMES_HOME",
+      "tools": ["fact_store", "fact_feedback"]
+    },
+    {
+      "name": "byterover",
+      "storage": "$HERMES_HOME/byterover",
+      "identity": "brv CLI cwd is the profile byterover dir, not the chat cwd",
+      "tools": ["brv_query", "brv_curate", "brv_status"]
+    }
+  ],
+  "skip_memory_callers": [
+    "cron/scheduler.py",
+    "tools/delegate_tool.py",
+    "batch_runner.py",
+    "agent/background_review.py",
+    "agent/curator.py",
+    "gateway/run.py compress and session-hygiene agents"
+  ],
+  "do_not_invent": [
+    "a second external provider in one process",
+    "a live builtin MemoryProvider",
+    "cross-profile memory access from the chat agent",
+    "a profile segment inside the gateway session key",
+    "new plugins/memory/<name> directories in this repo",
+    "hardcoded ~/.hermes paths",
+    "another adapter's identity rule (mem0 agent_identity, openviking gateway user, hindsight banks without a template, retaindb project hermes-default)",
+    "tool names or CLI verbs from an inactive provider",
+    "network calls inside is_available()",
+    "blocking sync_turn",
+    "patch or shell edits to MEMORY.md or USER.md",
+    "self-wrapped memory-context fences",
+    "recalled text as a new user turn or a permission",
+    "memory writes from cron, batch, review, curator, compress agents, or delegate_task children",
+    "mid-conversation provider or prompt swaps",
+    "facts, scopes, completion, ownership, model slugs, or pricing not present in config or tool output",
+    "model-provider plugins as memory planes",
+    "Drive, Open Brains, JEV, or vendor liaison agents as hermes memory providers"
+  ]
+}
