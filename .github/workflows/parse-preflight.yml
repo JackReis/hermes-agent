@@ -1,0 +1,31 @@
+name: parse-preflight
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  py-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Determine base commit
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: py_compile changed Python files
+        run: |
+          files=$(git diff --name-only --diff-filter=ACMR "${{ steps.base.outputs.sha }}" HEAD -- '*.py' || true)
+          if [ -z "$files" ]; then
+            echo "No changed .py files"
+            exit 0
+          fi
+          echo "Compiling:"
+          echo "$files"
+          echo "$files" | xargs python3 -m py_compile
