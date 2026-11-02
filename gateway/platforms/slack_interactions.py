@@ -137,11 +137,13 @@ class SlackInteractions:
         self._prune()
         if not isinstance(body, dict) or not isinstance(action, dict):
             return None
-        if not isinstance(action.get("value"), str) or not isinstance(action.get("action_id"), str):
+        token = action.get("value")
+        action_id = action.get("action_id")
+        if not isinstance(token, str) or not isinstance(action_id, str):
             return None
         choices = EXEC_CHOICES if kind == "exec" else CONFIRM_CHOICES
-        choice = choices.get(action.get("action_id"))
-        pending = self._pending.get(action.get("value"))
+        choice = choices.get(action_id)
+        pending = self._pending.get(token)
         if not choice or pending is None or pending.kind != kind or not pending.card_id:
             return None
         message = body.get("message") or {}
@@ -190,7 +192,7 @@ class SlackInteractions:
             from tools import slash_confirm
             with slash_confirm._lock:
                 native = slash_confirm._pending.get(pending.session_key)
-                if (native is not pending.native_request or native != pending.subject
+                if (native is None or native is not pending.native_request or native != pending.subject
                         or time.time() - native.get("created_at", 0) >= self.TTL):
                     self.discard(pending.token)
                     return None
