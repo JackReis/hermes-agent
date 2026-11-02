@@ -37,6 +37,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import MessageDeduplicator
+from gateway.platforms.slack_interactions import SlackInteractions
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -76,6 +77,9 @@ def _is_slack_file_url(url: str) -> bool:
 # visible in _process_message_background's child task.
 _slash_user_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "_slash_user_id", default=None,
+)
+_interaction_source: contextvars.ContextVar[Optional[Tuple[Any, Any]]] = contextvars.ContextVar(
+    "slack_interaction_source", default=None,
 )
 
 
@@ -334,9 +338,7 @@ class SlackAdapter(BasePlatformAdapter):
         # Dedup cache: prevents duplicate bot responses when Socket Mode
         # reconnects redeliver events.
         self._dedup = MessageDeduplicator()
-        # Track pending approval message_ts → resolved flag to prevent
-        # double-clicks on approval buttons.
-        self._approval_resolved: Dict[str, bool] = {}
+        self._interactions = SlackInteractions()
         # Track timestamps of messages sent by the bot so we can respond
         # to thread replies even without an explicit @mention.
         self._bot_message_ts: set = set()
@@ -364,6 +366,22 @@ class SlackAdapter(BasePlatformAdapter):
         # (channel_id, user_id) to avoid cross-user collisions.
         # Each value: {"response_url": str, "ts": float}
         self._slash_command_contexts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
+        # Queued turns can have a different actor in the same shared thread.
+        token = _interaction_source.set((self, event.source))
+        try:
+            await super()._process_message_background(event, session_key)
+        finally:
+            _interaction_source.reset(token)
+
+    def _prepare_interaction(self, chat_id, thread_id, session_key, kind, **subject):
+        context = _interaction_source.get()
+        source = context[1] if context and context[0] is self else None
+        return self._interactions.prepare(
+            self, source, getattr(source, "guild_id", None), chat_id,
+            thread_id, session_key, kind, **subject,
+        )
 
     def _describe_slack_api_error(self, response: Any, *, file_obj: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """Convert Slack API auth/permission failures into actionable user-facing text."""
@@ -753,6 +771,7 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Disconnect from Slack."""
+        self._interactions.clear()
         if self._handler:
             try:
                 await self._handler.close_async()
@@ -2203,6 +2222,7 @@ class SlackAdapter(BasePlatformAdapter):
             user_id=user_id,
             user_name=user_name,
             thread_id=thread_ts,
+            guild_id=team_id,
         )
 
         # Per-channel ephemeral prompt
@@ -2268,9 +2288,14 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return SendResult(success=False, error="Not connected")
 
+        pending = None
         try:
             cmd_preview = command[:2900] + "..." if len(command) > 2900 else command
             thread_ts = self._resolve_thread_ts(None, metadata)
+            pending = self._prepare_interaction(
+                chat_id, thread_ts, session_key, "exec",
+                command=command, description=description,
+            )
 
             blocks = [
                 {
@@ -2292,26 +2317,26 @@ class SlackAdapter(BasePlatformAdapter):
                             "text": {"type": "plain_text", "text": "Allow Once"},
                             "style": "primary",
                             "action_id": "hermes_approve_once",
-                            "value": session_key,
+                            "value": pending.token,
                         },
                         {
                             "type": "button",
                             "text": {"type": "plain_text", "text": "Allow Session"},
                             "action_id": "hermes_approve_session",
-                            "value": session_key,
+                            "value": pending.token,
                         },
                         {
                             "type": "button",
                             "text": {"type": "plain_text", "text": "Always Allow"},
                             "action_id": "hermes_approve_always",
-                            "value": session_key,
+                            "value": pending.token,
                         },
                         {
                             "type": "button",
                             "text": {"type": "plain_text", "text": "Deny"},
                             "style": "danger",
                             "action_id": "hermes_deny",
-                            "value": session_key,
+                            "value": pending.token,
                         },
                     ],
                 },
@@ -2325,13 +2350,14 @@ class SlackAdapter(BasePlatformAdapter):
             if thread_ts:
                 kwargs["thread_ts"] = thread_ts
 
-            result = await self._get_client(chat_id).chat_postMessage(**kwargs)
+            result = await self._team_clients[pending.team_id].chat_postMessage(**kwargs)
             msg_ts = result.get("ts", "")
-            if msg_ts:
-                self._approval_resolved[msg_ts] = False
+            self._interactions.bind_card(pending, msg_ts)
 
             return SendResult(success=True, message_id=msg_ts, raw_response=result)
         except Exception as e:
+            if pending is not None:
+                self._interactions.discard(pending.token)
             logger.error("[Slack] send_exec_approval failed: %s", e, exc_info=True)
             return SendResult(success=False, error=str(e))
 
@@ -2343,12 +2369,14 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return SendResult(success=False, error="Not connected")
 
+        pending = None
         try:
             body = message[:2900] + "..." if len(message) > 2900 else message
             thread_ts = self._resolve_thread_ts(None, metadata)
-            # Encode session_key and confirm_id into the button value so the
-            # callback handler can resolve without extra bookkeeping.
-            value = f"{session_key}|{confirm_id}"
+            pending = self._prepare_interaction(
+                chat_id, thread_ts, session_key, "confirm", confirm_id=confirm_id,
+            )
+            value = pending.token
 
             blocks = [
                 {
@@ -2393,9 +2421,13 @@ class SlackAdapter(BasePlatformAdapter):
             if thread_ts:
                 kwargs["thread_ts"] = thread_ts
 
-            result = await self._get_client(chat_id).chat_postMessage(**kwargs)
-            return SendResult(success=True, message_id=result.get("ts", ""), raw_response=result)
+            result = await self._team_clients[pending.team_id].chat_postMessage(**kwargs)
+            msg_ts = result.get("ts", "")
+            self._interactions.bind_card(pending, msg_ts)
+            return SendResult(success=True, message_id=msg_ts, raw_response=result)
         except Exception as e:
+            if pending is not None:
+                self._interactions.discard(pending.token)
             logger.error("[Slack] send_slash_confirm failed: %s", e, exc_info=True)
             return SendResult(success=False, error=str(e))
 
@@ -2403,37 +2435,22 @@ class SlackAdapter(BasePlatformAdapter):
         """Handle a slash-confirm button click from Block Kit."""
         await ack()
 
-        action_id = action.get("action_id", "")
-        value = action.get("value", "")
-        message = body.get("message", {})
-        msg_ts = message.get("ts", "")
-        channel_id = body.get("channel", {}).get("id", "")
-        user_name = body.get("user", {}).get("name", "unknown")
-        user_id = body.get("user", {}).get("id", "")
-
-        # Authorization — reuse the exec-approval allowlist.
-        allowed_csv = os.getenv("SLACK_ALLOWED_USERS", "").strip()
-        if allowed_csv:
-            allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
-            if "*" not in allowed_ids and user_id not in allowed_ids:
-                logger.warning(
-                    "[Slack] Unauthorized slash-confirm click by %s (%s) — ignoring",
-                    user_name, user_id,
-                )
-                return
-
-        # Parse session_key|confirm_id back out
-        if "|" not in value:
-            logger.warning("[Slack] Malformed slash-confirm value: %s", value)
+        resolved = self._interactions.consume(self, body, action, "confirm")
+        if resolved is None:
             return
-        session_key, confirm_id = value.split("|", 1)
+        pending, choice = resolved
+        message = body.get("message", {})
+        msg_ts = pending.card_id
+        channel_id = pending.source.chat_id
+        session_key = pending.session_key
+        user_name = body.get("user", {}).get("name", "unknown")
 
-        choice_map = {
-            "hermes_confirm_once": "once",
-            "hermes_confirm_always": "always",
-            "hermes_confirm_cancel": "cancel",
-        }
-        choice = choice_map.get(action_id, "cancel")
+        # The native pending entry was atomically consumed before any I/O.
+        try:
+            result_text = await pending.subject["handler"](choice)
+        except Exception as exc:
+            logger.error("Failed to resolve slash-confirm from Slack button: %s", exc, exc_info=True)
+            result_text = f"Error handling confirmation: {exc}"
 
         label_map = {
             "once": f"✅ Approved once by {user_name}",
@@ -2467,7 +2484,7 @@ class SlackAdapter(BasePlatformAdapter):
         ]
 
         try:
-            await self._get_client(channel_id).chat_update(
+            await self._team_clients[pending.team_id].chat_update(
                 channel=channel_id,
                 ts=msg_ts,
                 text=decision_text,
@@ -2476,20 +2493,18 @@ class SlackAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("[Slack] Failed to update slash-confirm message: %s", e)
 
-        # Resolve via the module-level primitive and post any follow-up.
+        # Post the native handler's follow-up in the bound thread.
         try:
-            from tools import slash_confirm as _slash_confirm_mod
-            result_text = await _slash_confirm_mod.resolve(session_key, confirm_id, choice)
-            if result_text:
+            if isinstance(result_text, str) and result_text:
                 post_kwargs: Dict[str, Any] = {
                     "channel": channel_id,
                     "text": result_text,
                 }
                 # Inherit the thread so the reply stays in the same place.
-                thread_ts = message.get("thread_ts") or msg_ts
+                thread_ts = pending.thread_id or msg_ts
                 if thread_ts:
                     post_kwargs["thread_ts"] = thread_ts
-                await self._get_client(channel_id).chat_postMessage(**post_kwargs)
+                await self._team_clients[pending.team_id].chat_postMessage(**post_kwargs)
             logger.info(
                 "Slack button resolved slash-confirm for session %s (choice=%s, user=%s)",
                 session_key, choice, user_name,
@@ -2501,39 +2516,14 @@ class SlackAdapter(BasePlatformAdapter):
         """Handle an approval button click from Block Kit."""
         await ack()
 
-        action_id = action.get("action_id", "")
-        session_key = action.get("value", "")
-        message = body.get("message", {})
-        msg_ts = message.get("ts", "")
-        channel_id = body.get("channel", {}).get("id", "")
-        user_name = body.get("user", {}).get("name", "unknown")
-        user_id = body.get("user", {}).get("id", "")
-
-        # Only authorized users may click approval buttons.  Button clicks
-        # bypass the normal message auth flow in gateway/run.py, so we must
-        # check here as well.
-        allowed_csv = os.getenv("SLACK_ALLOWED_USERS", "").strip()
-        if allowed_csv:
-            allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
-            if "*" not in allowed_ids and user_id not in allowed_ids:
-                logger.warning(
-                    "[Slack] Unauthorized approval click by %s (%s) — ignoring",
-                    user_name, user_id,
-                )
-                return
-
-        # Map action_id to approval choice
-        choice_map = {
-            "hermes_approve_once": "once",
-            "hermes_approve_session": "session",
-            "hermes_approve_always": "always",
-            "hermes_deny": "deny",
-        }
-        choice = choice_map.get(action_id, "deny")
-
-        # Prevent double-clicks — atomic pop; first caller gets False, others get True (default)
-        if self._approval_resolved.pop(msg_ts, True):
+        resolved = self._interactions.consume(self, body, action, "exec")
+        if resolved is None:
             return
+        pending, choice = resolved
+        message = body.get("message", {})
+        msg_ts = pending.card_id
+        channel_id = pending.source.chat_id
+        user_name = body.get("user", {}).get("name", "unknown")
 
         # Update the message to show the decision and remove buttons
         label_map = {
@@ -2568,7 +2558,7 @@ class SlackAdapter(BasePlatformAdapter):
         ]
 
         try:
-            await self._get_client(channel_id).chat_update(
+            await self._team_clients[pending.team_id].chat_update(
                 channel=channel_id,
                 ts=msg_ts,
                 text=decision_text,
@@ -2576,19 +2566,6 @@ class SlackAdapter(BasePlatformAdapter):
             )
         except Exception as e:
             logger.warning("[Slack] Failed to update approval message: %s", e)
-
-        # Resolve the approval — this unblocks the agent thread
-        try:
-            from tools.approval import resolve_gateway_approval
-            count = resolve_gateway_approval(session_key, choice)
-            logger.info(
-                "Slack button resolved %d approval(s) for session %s (choice=%s, user=%s)",
-                count, session_key, choice, user_name,
-            )
-        except Exception as exc:
-            logger.error("Failed to resolve gateway approval from Slack button: %s", exc)
-
-        # (approval state already consumed by atomic pop above)
 
     # ----- Thread context fetching -----
 
@@ -2826,6 +2803,7 @@ class SlackAdapter(BasePlatformAdapter):
             chat_id=channel_id,
             chat_type="dm" if is_dm else "group",
             user_id=user_id,
+            guild_id=team_id,
         )
 
         event = MessageEvent(
