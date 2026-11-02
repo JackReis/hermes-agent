@@ -63,178 +63,69 @@ def _make_adapter():
 # send_exec_approval — Block Kit buttons
 # ===========================================================================
 
+# Reuse a native-session harness, not fabricated session-key button values.
+from tests.gateway.test_slack_interaction_binding import harness  # noqa: F401
+
+
 class TestSlackExecApproval:
-    """Test the send_exec_approval method sends Block Kit buttons."""
+    @pytest.mark.asyncio
+    async def test_sends_blocks_with_buttons(self, harness):
+        body, action = await harness.issue()
+        card = harness.cards[-1]
+        assert harness.result.success
+        elements = card["blocks"][1]["elements"]
+        assert {e["action_id"] for e in elements} == {
+            "hermes_approve_once", "hermes_approve_session", "hermes_approve_always", "hermes_deny",
+        }
+        assert all(e["value"] == action["value"] for e in elements)
+        assert action["value"] != harness.key
+        assert harness.command in card["blocks"][0]["text"]["text"]
+        assert harness.description in card["blocks"][0]["text"]["text"]
 
     @pytest.mark.asyncio
-    async def test_sends_blocks_with_buttons(self):
-        adapter = _make_adapter()
-        mock_client = adapter._team_clients["T1"]
-        mock_client.chat_postMessage = AsyncMock(return_value={"ts": "1234.5678"})
-
-        result = await adapter.send_exec_approval(
-            chat_id="C1",
-            command="rm -rf /important",
-            session_key="agent:main:slack:group:C1:1111",
-            description="dangerous deletion",
-        )
-
-        assert result.success is True
-        assert result.message_id == "1234.5678"
-
-        # Verify chat_postMessage was called with blocks
-        mock_client.chat_postMessage.assert_called_once()
-        kwargs = mock_client.chat_postMessage.call_args[1]
-        assert "blocks" in kwargs
-        blocks = kwargs["blocks"]
-        assert len(blocks) == 2
-        assert blocks[0]["type"] == "section"
-        assert "rm -rf /important" in blocks[0]["text"]["text"]
-        assert "dangerous deletion" in blocks[0]["text"]["text"]
-        assert blocks[1]["type"] == "actions"
-        elements = blocks[1]["elements"]
-        assert len(elements) == 4
-        action_ids = [e["action_id"] for e in elements]
-        assert "hermes_approve_once" in action_ids
-        assert "hermes_approve_session" in action_ids
-        assert "hermes_approve_always" in action_ids
-        assert "hermes_deny" in action_ids
-        # Each button carries the session key as value
-        for e in elements:
-            assert e["value"] == "agent:main:slack:group:C1:1111"
-
-    @pytest.mark.asyncio
-    async def test_sends_in_thread(self):
-        adapter = _make_adapter()
-        mock_client = adapter._team_clients["T1"]
-        mock_client.chat_postMessage = AsyncMock(return_value={"ts": "1234.5678"})
-
-        await adapter.send_exec_approval(
-            chat_id="C1",
-            command="echo test",
-            session_key="test-session",
-            metadata={"thread_id": "9999.0000"},
-        )
-
-        kwargs = mock_client.chat_postMessage.call_args[1]
-        assert kwargs.get("thread_ts") == "9999.0000"
+    async def test_sends_in_thread(self, harness):
+        await harness.issue(source=harness.source(thread="9999.0000"))
+        assert harness.cards[-1]["thread_ts"] == "9999.0000"
 
     @pytest.mark.asyncio
     async def test_not_connected(self):
         adapter = _make_adapter()
         adapter._app = None
-        result = await adapter.send_exec_approval(
-            chat_id="C1", command="ls", session_key="s"
-        )
-        assert result.success is False
+        result = await adapter.send_exec_approval(chat_id="C1", command="ls", session_key="s")
+        assert not result.success
 
     @pytest.mark.asyncio
-    async def test_truncates_long_command(self):
-        adapter = _make_adapter()
-        mock_client = adapter._team_clients["T1"]
-        mock_client.chat_postMessage = AsyncMock(return_value={"ts": "1.2"})
+    async def test_truncates_long_command(self, harness):
+        harness.command = "x" * 5000
+        await harness.issue()
+        text = harness.cards[-1]["blocks"][0]["text"]["text"]
+        assert "..." in text
+        assert len(text) < 5000
 
-        long_cmd = "x" * 5000
-        await adapter.send_exec_approval(
-            chat_id="C1", command=long_cmd, session_key="s"
-        )
-
-        kwargs = mock_client.chat_postMessage.call_args[1]
-        section_text = kwargs["blocks"][0]["text"]["text"]
-        assert "..." in section_text
-        assert len(section_text) < 5000
-
-
-# ===========================================================================
-# _handle_approval_action — button click handler
-# ===========================================================================
 
 class TestSlackApprovalAction:
-    """Test the approval button click handler."""
+    @pytest.mark.asyncio
+    async def test_resolves_approval(self, harness):
+        body, action = await harness.issue()
+        await harness.click("exec", body, action)
+        assert harness.native.result == "once"
+        assert harness.native.event.is_set()
+        assert "Approved once by alice" in harness.client.chat_update.call_args.kwargs["text"]
 
     @pytest.mark.asyncio
-    async def test_resolves_approval(self):
-        adapter = _make_adapter()
-        adapter._approval_resolved["1234.5678"] = False
-
-        ack = AsyncMock()
-        body = {
-            "message": {
-                "ts": "1234.5678",
-                "blocks": [
-                    {"type": "section", "text": {"type": "mrkdwn", "text": "original text"}},
-                    {"type": "actions", "elements": []},
-                ],
-            },
-            "channel": {"id": "C1"},
-            "user": {"name": "norbert"},
-        }
-        action = {
-            "action_id": "hermes_approve_once",
-            "value": "agent:main:slack:group:C1:1111",
-        }
-
-        mock_client = adapter._team_clients["T1"]
-        mock_client.chat_update = AsyncMock()
-
-        with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
-            await adapter._handle_approval_action(ack, body, action)
-
-        ack.assert_called_once()
-        mock_resolve.assert_called_once_with("agent:main:slack:group:C1:1111", "once")
-
-        # Message should be updated with decision
-        mock_client.chat_update.assert_called_once()
-        update_kwargs = mock_client.chat_update.call_args[1]
-        assert "Approved once by norbert" in update_kwargs["text"]
+    async def test_prevents_double_click(self, harness):
+        body, action = await harness.issue()
+        await harness.click("exec", body, action)
+        await harness.click("exec", body, action)
+        harness.client.chat_update.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_prevents_double_click(self):
-        adapter = _make_adapter()
-        adapter._approval_resolved["1234.5678"] = True  # Already resolved
-
-        ack = AsyncMock()
-        body = {
-            "message": {"ts": "1234.5678", "blocks": []},
-            "channel": {"id": "C1"},
-            "user": {"name": "norbert"},
-        }
-        action = {
-            "action_id": "hermes_approve_once",
-            "value": "some-session",
-        }
-
-        with patch("tools.approval.resolve_gateway_approval") as mock_resolve:
-            await adapter._handle_approval_action(ack, body, action)
-
-        # Should have acked but NOT resolved
-        ack.assert_called_once()
-        mock_resolve.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_deny_action(self):
-        adapter = _make_adapter()
-        adapter._approval_resolved["1.2"] = False
-
-        ack = AsyncMock()
-        body = {
-            "message": {"ts": "1.2", "blocks": [
-                {"type": "section", "text": {"type": "mrkdwn", "text": "cmd"}},
-            ]},
-            "channel": {"id": "C1"},
-            "user": {"name": "alice"},
-        }
-        action = {"action_id": "hermes_deny", "value": "session-key"}
-
-        mock_client = adapter._team_clients["T1"]
-        mock_client.chat_update = AsyncMock()
-
-        with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
-            await adapter._handle_approval_action(ack, body, action)
-
-        mock_resolve.assert_called_once_with("session-key", "deny")
-        update_kwargs = mock_client.chat_update.call_args[1]
-        assert "Denied by alice" in update_kwargs["text"]
+    async def test_deny_action(self, harness):
+        body, action = await harness.issue()
+        action["action_id"] = "hermes_deny"
+        await harness.click("exec", body, action)
+        assert harness.native.result == "deny"
+        assert "Denied by alice" in harness.client.chat_update.call_args.kwargs["text"]
 
 
 # ===========================================================================
